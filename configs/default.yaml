@@ -1,0 +1,42 @@
+# Default experiment configuration
+# Override per-experiment in configs/experiment/
+
+data:
+  raw_dir: data/raw
+  processed_dir: data/processed
+  splits_dir: data/splits
+  batch_size: 32
+  num_workers: 4
+  pin_memory: true
+
+model:
+  name: base_model
+  # Add model-specific parameters here
+  # e.g., hidden_dim: 256
+
+training:
+  epochs: 100
+  learning_rate: 1.0e-3
+  weight_decay: 1.0e-4
+  optimizer: adam  # adam | adamw | sgd
+  scheduler: cosine  # cosine | step | none
+  scheduler_params:
+    T_max: 100
+  grad_clip_norm: 1.0
+  seed: 42
+  device: cuda
+  checkpoint_dir: checkpoints
+  save_every_n_epochs: 10
+  early_stopping_patience: 0  # 0 = disabled
+
+evaluation:
+  metrics:
+    - accuracy
+  eval_every_n_epochs: 1
+
+wandb:
+  enabled: true
+  project: "event_graph_generation"
+  entity: null  # your wandb team/user
+  tags: []
+  notes: ""
