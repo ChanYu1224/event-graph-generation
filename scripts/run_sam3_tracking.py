@@ -164,16 +164,10 @@ def main() -> None:
     temporal_window = config.get("temporal_window", 16)
     sample_rate = config.get("sample_rate", 1)
     max_frames = config.get("max_frames", None)
-    image_size = tuple(config.get("image_size", [480, 640]))
+    image_size_cfg = config.get("image_size", None)
 
     tracker = SAM3Tracker(model_size=model_size, device=device)
     tracker.set_concept_prompts(concept_prompts)
-
-    extractor = FeatureExtractor(
-        temporal_window=temporal_window,
-        normalize_coords=True,
-        image_size=image_size,
-    )
 
     # Process videos
     for video_path in tqdm(videos, desc="Processing videos"):
@@ -194,6 +188,20 @@ def main() -> None:
         if not frames:
             logger.warning("No frames read from %s, skipping.", video_path)
             continue
+
+        # Determine image_size from config or actual frame dimensions
+        if image_size_cfg is not None:
+            image_size = tuple(image_size_cfg)
+        else:
+            actual_h, actual_w = frames[0].shape[:2]
+            image_size = (actual_h, actual_w)
+            logger.info("Using actual frame size: %dx%d", actual_w, actual_h)
+
+        extractor = FeatureExtractor(
+            temporal_window=temporal_window,
+            normalize_coords=True,
+            image_size=image_size,
+        )
 
         # Run SAM 3 tracking
         try:
