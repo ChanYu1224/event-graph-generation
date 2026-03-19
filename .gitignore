@@ -13,7 +13,7 @@ wheels/
 output/
 
 # Training data and artifacts
-data/
+/data/
 
 # Logs
 logs/
