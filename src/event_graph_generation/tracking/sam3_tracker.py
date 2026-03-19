@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import logging
+from collections.abc import Iterable
 from dataclasses import dataclass, field
 
 import numpy as np
@@ -79,8 +80,8 @@ class SAM3Tracker:
 
     def track_video(
         self,
-        frames: list[np.ndarray],
-        frame_indices: list[int],
+        frames: Iterable[np.ndarray],
+        frame_indices: Iterable[int],
     ) -> list[FrameTrackingResult]:
         """Process video frames through SAM 3 for object tracking.
 
@@ -88,7 +89,7 @@ class SAM3Tracker:
         detects objects matching the configured concept prompts.
 
         Args:
-            frames: List of video frames as numpy arrays (H, W, 3) in BGR or RGB.
+            frames: Iterable of video frames as numpy arrays (H, W, 3) in BGR or RGB.
             frame_indices: Corresponding frame indices in the original video.
 
         Returns:

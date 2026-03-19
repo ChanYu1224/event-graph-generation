@@ -54,7 +54,7 @@ class FeatureExtractor:
         self,
         temporal_window: int = 16,
         normalize_coords: bool = True,
-        image_size: tuple[int, int] = (480, 640),
+        image_size: tuple[int, int] = (566, 1008),
     ) -> None:
         """Initialize the feature extractor.
 
