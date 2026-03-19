@@ -181,6 +181,7 @@ def process_image(
             images=[image],
             return_tensors="pt",
         ).to(model.device)
+        inputs.pop("token_type_ids", None)
 
         gen_start = time.monotonic()
         with torch.inference_mode():
@@ -268,8 +269,9 @@ def main() -> None:
     processor = AutoProcessor.from_pretrained(args.model)
     model = AutoModelForImageTextToText.from_pretrained(
         args.model,
-        torch_dtype=torch.bfloat16,
+        dtype=torch.bfloat16,
         device_map="auto",
+        attn_implementation="sdpa",
     )
 
     # 処理ループ

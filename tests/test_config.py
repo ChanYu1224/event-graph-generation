@@ -19,7 +19,7 @@ def test_from_yaml_defaults() -> None:
 
     assert config.data.batch_size == 32
     assert config.training.learning_rate == 1e-3
-    assert config.training.optimizer == "adam"
+    assert config.training.optimizer == "adamw"
 
 
 def test_from_yaml_override() -> None:
@@ -32,7 +32,7 @@ def test_from_yaml_override() -> None:
 
     assert config.data.batch_size == 64
     assert config.training.learning_rate == 5e-4
-    assert config.training.optimizer == "adam"  # default preserved
+    assert config.training.optimizer == "adamw"  # default preserved
 
 
 def test_merge() -> None:

@@ -5,8 +5,11 @@ import subprocess
 import sys
 
 MODELS = [
-    "Qwen/Qwen3.5-122B-A10B",
+    "Qwen/Qwen3.5-35B-A3B",
+    "Qwen/Qwen3.5-27B",
 ]
+
+EXPECTED_NUM_GPUS = 4
 
 BENCH_SCRIPT = r'''
 import json, sys, time, torch
@@ -16,6 +19,13 @@ from transformers import AutoModelForImageTextToText, AutoProcessor
 
 model_name = sys.argv[1]
 image_path = sys.argv[2]
+expected_gpus = int(sys.argv[3])
+
+# GPU数チェック（4xA5000前提）
+num_gpus = torch.cuda.device_count()
+if num_gpus != expected_gpus:
+    print(f"ERROR: {expected_gpus}xGPUが必要ですが、{num_gpus}台しか検出されませんでした", file=sys.stderr)
+    sys.exit(1)
 
 # モデルロード
 processor = AutoProcessor.from_pretrained(model_name)
@@ -24,8 +34,8 @@ model = AutoModelForImageTextToText.from_pretrained(
 )
 
 # 全GPUの合計VRAM計測
-num_gpus = torch.cuda.device_count()
 vram_after_load = sum(torch.cuda.memory_allocated(i) for i in range(num_gpus)) / 1e9
+per_gpu_vram_model = [round(torch.cuda.memory_allocated(i) / 1e9, 2) for i in range(num_gpus)]
 
 # 推論
 image = Image.open(image_path).convert("RGB")
@@ -52,6 +62,7 @@ with torch.inference_mode():
 elapsed = time.perf_counter() - start
 
 vram_peak = sum(torch.cuda.max_memory_allocated(i) for i in range(num_gpus)) / 1e9
+per_gpu_vram_peak = [round(torch.cuda.max_memory_allocated(i) / 1e9, 2) for i in range(num_gpus)]
 input_len = inputs["input_ids"].shape[1]
 gen_tokens = output_ids.shape[1] - input_len
 
@@ -60,6 +71,8 @@ result = {
     "num_gpus": num_gpus,
     "vram_model_gb": round(vram_after_load, 2),
     "vram_peak_gb": round(vram_peak, 2),
+    "per_gpu_vram_model_gb": per_gpu_vram_model,
+    "per_gpu_vram_peak_gb": per_gpu_vram_peak,
     "input_tokens": input_len,
     "generated_tokens": int(gen_tokens),
     "elapsed_seconds": round(elapsed, 2),
@@ -76,7 +89,7 @@ def run_benchmark(model_name: str, image_path: str) -> dict | None:
     print(f"{'='*60}")
 
     result = subprocess.run(
-        [sys.executable, "-c", BENCH_SCRIPT, model_name, image_path],
+        [sys.executable, "-c", BENCH_SCRIPT, model_name, image_path, str(EXPECTED_NUM_GPUS)],
         capture_output=True,
         text=True,
         timeout=1800,
@@ -106,24 +119,35 @@ def main() -> None:
         data = run_benchmark(model_name, image_path)
         if data:
             results.append(data)
-            print(f"  モデルVRAM: {data['vram_model_gb']:.2f} GB")
-            print(f"  ピークVRAM: {data['vram_peak_gb']:.2f} GB")
+            print(f"  モデルVRAM (合計): {data['vram_model_gb']:.2f} GB")
+            print(f"  ピークVRAM (合計): {data['vram_peak_gb']:.2f} GB")
+            for i, (model_vram, peak_vram) in enumerate(
+                zip(data["per_gpu_vram_model_gb"], data["per_gpu_vram_peak_gb"])
+            ):
+                print(f"    GPU {i}: モデル {model_vram:.2f} GB / ピーク {peak_vram:.2f} GB")
             print(f"  生成速度:   {data['tokens_per_second']:.1f} toks/s")
             print(f"  生成時間:   {data['elapsed_seconds']:.2f}s ({data['generated_tokens']} tokens)")
 
     # サマリーテーブル
-    print(f"\n{'='*60}")
-    print("サマリー")
-    print(f"{'='*60}")
-    print(f"{'モデル':<28} {'モデルVRAM':>10} {'ピークVRAM':>10} {'速度':>10}")
-    print("-" * 60)
+    print(f"\n{'='*80}")
+    print("サマリー (4xA5000)")
+    print(f"{'='*80}")
+    header = f"{'モデル':<28} {'合計VRAM':>10} {'合計ピーク':>10}"
+    for i in range(EXPECTED_NUM_GPUS):
+        header += f" {'GPU'+str(i)+' peak':>10}"
+    header += f" {'速度':>10}"
+    print(header)
+    print("-" * 80)
     for r in results:
         short = r["model"].split("/")[-1]
-        print(
+        line = (
             f"{short:<28} {r['vram_model_gb']:>8.2f}GB "
-            f"{r['vram_peak_gb']:>8.2f}GB "
-            f"{r['tokens_per_second']:>7.1f}t/s"
+            f"{r['vram_peak_gb']:>8.2f}GB"
         )
+        for peak in r["per_gpu_vram_peak_gb"]:
+            line += f" {peak:>8.2f}GB"
+        line += f" {r['tokens_per_second']:>7.1f}t/s"
+        print(line)
 
 
 if __name__ == "__main__":

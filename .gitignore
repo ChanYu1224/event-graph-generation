@@ -12,9 +12,11 @@ wheels/
 # Output
 output/
 
-# Training data
-data/raw/
-data/processed/
+# Training data and artifacts
+data/
+
+# Logs
+logs/
 
 # Experiment artifacts
 checkpoints/

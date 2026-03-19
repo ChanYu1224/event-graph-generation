@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+import logging
 import sys
 from pathlib import Path
 
@@ -17,6 +18,8 @@ from event_graph_generation.training.trainer import Trainer
 from event_graph_generation.evaluation.evaluator import Evaluator
 from event_graph_generation.utils.logging import setup_logging
 from event_graph_generation.utils.seed import seed_everything
+
+logger = logging.getLogger(__name__)
 
 
 def main() -> None:
@@ -43,13 +46,77 @@ def main() -> None:
     setup_logging()
     seed_everything(config.training.seed)
 
-    # TODO: Replace with your dataset and dataloaders
-    train_loader = None  # build your DataLoader here
-    val_loader = None  # build your DataLoader here
+    if config.model.name == "event_decoder":
+        # Event Decoder pipeline
+        from torch.utils.data import DataLoader
 
-    model = build_model(config.model)
-    evaluator = Evaluator(config.evaluation, device=config.training.device)
-    trainer = Trainer(model, train_loader, val_loader, config, evaluator)
+        from event_graph_generation.data.event_dataset import EventGraphDataset
+        from event_graph_generation.data.event_collator import event_collate_fn
+        from event_graph_generation.models.losses import EventGraphLoss
+
+        data_dir = Path(config.data.processed_dir)
+
+        train_dataset = EventGraphDataset(
+            data_dir=data_dir,
+            split="train",
+            max_objects=config.model.max_objects,
+        )
+        val_dataset = EventGraphDataset(
+            data_dir=data_dir,
+            split="val",
+            max_objects=config.model.max_objects,
+        )
+
+        train_loader = DataLoader(
+            train_dataset,
+            batch_size=config.data.batch_size,
+            shuffle=True,
+            num_workers=config.data.num_workers,
+            pin_memory=config.data.pin_memory,
+            collate_fn=event_collate_fn,
+            drop_last=True,
+            persistent_workers=config.data.num_workers > 0,
+        )
+        val_loader = DataLoader(
+            val_dataset,
+            batch_size=config.data.batch_size,
+            shuffle=False,
+            num_workers=config.data.num_workers,
+            pin_memory=config.data.pin_memory,
+            collate_fn=event_collate_fn,
+            persistent_workers=config.data.num_workers > 0,
+        )
+
+        # Build loss with weights from config
+        loss_weights = {
+            "interaction": config.training.loss_weights.interaction,
+            "action": config.training.loss_weights.action,
+            "agent_ptr": config.training.loss_weights.agent_ptr,
+            "target_ptr": config.training.loss_weights.target_ptr,
+            "source_ptr": config.training.loss_weights.source_ptr,
+            "dest_ptr": config.training.loss_weights.dest_ptr,
+            "frame": config.training.loss_weights.frame,
+        }
+        criterion = EventGraphLoss(
+            loss_weights=loss_weights,
+            num_actions=config.model.num_actions,
+        )
+
+        model = build_model(config.model)
+        evaluator = Evaluator(config.evaluation, device=config.training.device)
+        trainer = Trainer(
+            model, train_loader, val_loader, config, evaluator, criterion=criterion
+        )
+
+        logger.info(f"Event Decoder training: {len(train_dataset)} train, {len(val_dataset)} val samples")
+    else:
+        # Legacy path
+        train_loader = None  # build your DataLoader here
+        val_loader = None  # build your DataLoader here
+
+        model = build_model(config.model)
+        evaluator = Evaluator(config.evaluation, device=config.training.device)
+        trainer = Trainer(model, train_loader, val_loader, config, evaluator)
 
     if args.resume:
         trainer.resume(args.resume)

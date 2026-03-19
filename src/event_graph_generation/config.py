@@ -23,11 +23,85 @@ class DataConfig:
 @dataclass
 class ModelConfig:
     name: str = "base_model"
+    # Event Decoder parameters
+    d_model: int = 256
+    nhead: int = 8
+    num_object_encoder_layers: int = 3
+    num_context_encoder_layers: int = 3
+    num_event_decoder_layers: int = 4
+    num_event_queries: int = 20
+    max_objects: int = 30
+    dropout: float = 0.1
+    d_geo: int = 12
+    d_pair: int = 7
+    num_actions: int = 13
+    embedding_dim: int = 256
+
+
+@dataclass
+class SAM3Config:
+    model_size: str = "large"
+    device: str = "cuda"
+    batch_size: int = 1
+    score_threshold: float = 0.3
+    embedding_dim: int = 256
+    concept_prompts: list[str] = field(
+        default_factory=lambda: ["person", "wrench", "screwdriver", "drawer", "workbench"]
+    )
+    output_dir: str = "data/sam3_outputs"
+
+
+@dataclass
+class VLMConfig:
+    model_name: str = "Qwen/Qwen3.5-9B"
+    device_map: str = "auto"
+    torch_dtype: str = "bfloat16"
+    max_new_tokens: int = 4096
+    temperature: float = 0.1
+    do_sample: bool = True
+    thinking: bool = False
+    clip_length: int = 16
+    clip_stride: int = 8
+    target_fps: float = 1.0
+    max_retries: int = 3
+    output_dir: str = "data/annotations"
+    quantization: str = "none"  # "none", "4bit", "8bit"
+    bnb_4bit_quant_type: str = "nf4"
+    bnb_4bit_use_double_quant: bool = True
+
+
+@dataclass
+class EventDecoderConfig:
+    """Training-specific config for Event Decoder loss weights."""
+    interaction: float = 2.0
+    action: float = 1.0
+    agent_ptr: float = 1.0
+    target_ptr: float = 1.0
+    source_ptr: float = 0.5
+    dest_ptr: float = 0.5
+    frame: float = 0.5
+
+
+@dataclass
+class InferenceConfig:
+    sam3: SAM3Config = field(default_factory=SAM3Config)
+    target_fps: float = 1.0
+    clip_length: int = 16
+    clip_stride: int = 8
+    checkpoint_path: str = "data/checkpoints/best.pt"
+    confidence_threshold: float = 0.5
+    device: str = "cuda"
+    nms_frame_threshold: int = 3
+    output_dir: str = "output/event_graphs"
+    output_format: str = "json"
 
 
 @dataclass
 class SchedulerParams:
     T_max: int = 100
+    warmup_epochs: int = 0
+    step_size: int = 30
+    gamma: float = 0.1
 
 
 @dataclass
@@ -35,7 +109,7 @@ class TrainingConfig:
     epochs: int = 100
     learning_rate: float = 1e-3
     weight_decay: float = 1e-4
-    optimizer: str = "adam"
+    optimizer: str = "adamw"
     scheduler: str = "cosine"
     scheduler_params: SchedulerParams = field(default_factory=SchedulerParams)
     grad_clip_norm: float = 1.0
@@ -44,6 +118,7 @@ class TrainingConfig:
     checkpoint_dir: str = "checkpoints"
     save_every_n_epochs: int = 10
     early_stopping_patience: int = 0
+    loss_weights: EventDecoderConfig = field(default_factory=EventDecoderConfig)
 
 
 @dataclass
@@ -68,6 +143,9 @@ class Config:
     training: TrainingConfig = field(default_factory=TrainingConfig)
     evaluation: EvaluationConfig = field(default_factory=EvaluationConfig)
     wandb: WandbConfig = field(default_factory=WandbConfig)
+    sam3: SAM3Config = field(default_factory=SAM3Config)
+    vlm: VLMConfig = field(default_factory=VLMConfig)
+    inference: InferenceConfig = field(default_factory=InferenceConfig)
 
     @classmethod
     def from_yaml(cls, path: str | Path) -> Config:
@@ -84,7 +162,7 @@ class Config:
         if "model" in d:
             cfg.model = _update_dataclass(cfg.model, d["model"])
         if "training" in d:
-            training_d = d["training"]
+            training_d = d["training"].copy()
             if "scheduler_params" in training_d:
                 sp = _update_dataclass(
                     cfg.training.scheduler_params, training_d.pop("scheduler_params")
@@ -93,10 +171,25 @@ class Config:
                 cfg.training.scheduler_params = sp
             else:
                 cfg.training = _update_dataclass(cfg.training, training_d)
+            if "loss_weights" in d["training"]:
+                cfg.training.loss_weights = _update_dataclass(
+                    cfg.training.loss_weights, d["training"]["loss_weights"]
+                )
         if "evaluation" in d:
             cfg.evaluation = _update_dataclass(cfg.evaluation, d["evaluation"])
         if "wandb" in d:
             cfg.wandb = _update_dataclass(cfg.wandb, d["wandb"])
+        if "sam3" in d:
+            cfg.sam3 = _update_dataclass(cfg.sam3, d["sam3"])
+        if "vlm" in d:
+            cfg.vlm = _update_dataclass(cfg.vlm, d["vlm"])
+        if "inference" in d:
+            inference_d = d["inference"].copy()
+            if "sam3" in inference_d:
+                cfg.inference.sam3 = _update_dataclass(
+                    cfg.inference.sam3, inference_d.pop("sam3")
+                )
+            cfg.inference = _update_dataclass(cfg.inference, inference_d)
         return cfg
 
     def merge(self, override_path: str | Path) -> Config:
