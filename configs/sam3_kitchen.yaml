@@ -1,0 +1,26 @@
+# SAM 3 configuration - Kitchen domain
+sam3:
+  model_size: "large"
+  device: "cuda"
+  batch_size: 1
+  score_threshold: 0.3
+  embedding_dim: 256
+  concept_prompts:
+    - "person"
+    - "hand"
+    - "knife"
+    - "cutting board"
+    - "pan"
+    - "pot"
+    - "plate"
+    - "cup"
+    - "bottle"
+    - "spoon"
+    - "chopsticks"
+    - "sink"
+    - "stove"
+    - "fridge"
+    - "trash can"
+  output_dir: "data/sam3_outputs"
+  resize_max_side: 1008
+  resized_video_dir: "data/resized"

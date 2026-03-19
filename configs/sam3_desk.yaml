@@ -1,0 +1,25 @@
+# SAM 3 configuration - Desk domain
+sam3:
+  model_size: "large"
+  device: "cuda"
+  batch_size: 1
+  score_threshold: 0.3
+  embedding_dim: 256
+  concept_prompts:
+    - "person"
+    - "hand"
+    - "keyboard"
+    - "mouse"
+    - "monitor"
+    - "laptop"
+    - "tablet"
+    - "cup"
+    - "pen"
+    - "notebook"
+    - "desk"
+    - "drawer"
+    - "chair"
+    - "phone"
+  output_dir: "data/sam3_outputs"
+  resize_max_side: 1008
+  resized_video_dir: "data/resized"
