@@ -1,0 +1,24 @@
+# Inference pipeline configuration
+inference:
+  # SAM 3
+  sam3:
+    model_size: "large"
+    device: "cuda"
+    score_threshold: 0.3
+
+  # Frame sampling
+  target_fps: 1.0
+  clip_length: 16
+  clip_stride: 8
+
+  # Event Decoder
+  checkpoint_path: "data/checkpoints/best.pt"
+  confidence_threshold: 0.5
+  device: "cuda"
+
+  # NMS-like deduplication for overlapping windows
+  nms_frame_threshold: 3
+
+  # Output
+  output_dir: "output/event_graphs"
+  output_format: "json"

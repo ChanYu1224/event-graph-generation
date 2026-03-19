@@ -1,0 +1,68 @@
+# Action vocabulary for the Event Decoder
+# Determines the number of output classes for the action classification head
+
+actions:
+  - name: "take_out"
+    description: "物体を容器/収納から取り出す"
+    requires_source: true
+    requires_destination: false
+
+  - name: "put_in"
+    description: "物体を容器/収納に入れる"
+    requires_source: false
+    requires_destination: true
+
+  - name: "place_on"
+    description: "物体を面の上に置く"
+    requires_source: false
+    requires_destination: true
+
+  - name: "pick_up"
+    description: "面の上から物体を持ち上げる"
+    requires_source: true
+    requires_destination: false
+
+  - name: "hand_over"
+    description: "人から人へ物体を渡す"
+    requires_source: true
+    requires_destination: true
+
+  - name: "open"
+    description: "容器/引き出し/蓋を開ける"
+    requires_source: false
+    requires_destination: false
+
+  - name: "close"
+    description: "容器/引き出し/蓋を閉める"
+    requires_source: false
+    requires_destination: false
+
+  - name: "use"
+    description: "工具/道具を使用する"
+    requires_source: false
+    requires_destination: false
+
+  - name: "move"
+    description: "物体を場所Aから場所Bへ移動する"
+    requires_source: true
+    requires_destination: true
+
+  - name: "attach"
+    description: "物体を別の物体に取り付ける"
+    requires_source: false
+    requires_destination: true
+
+  - name: "detach"
+    description: "物体を別の物体から取り外す"
+    requires_source: true
+    requires_destination: false
+
+  - name: "inspect"
+    description: "物体を視認/確認する"
+    requires_source: false
+    requires_destination: false
+
+  - name: "no_event"
+    description: "イベントなし (negative class)"
+    requires_source: false
+    requires_destination: false

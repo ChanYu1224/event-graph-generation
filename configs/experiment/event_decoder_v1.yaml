@@ -1,0 +1,17 @@
+data:
+  processed_dir: "data/aligned"
+  splits_dir: "data/aligned/splits"
+  batch_size: 16
+model:
+  name: "event_decoder"
+training:
+  epochs: 100
+  learning_rate: 1.0e-4
+  optimizer: adamw
+  scheduler: cosine_warmup
+  scheduler_params:
+    T_max: 100
+    warmup_epochs: 5
+wandb:
+  project: "event_graph_generation"
+  tags: ["event_decoder", "v1"]

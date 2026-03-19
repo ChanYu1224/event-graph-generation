@@ -1,0 +1,65 @@
+# Event Decoder training hyperparameters
+data:
+  raw_dir: "data/raw"
+  processed_dir: "data/aligned"
+  splits_dir: "data/aligned/splits"
+  batch_size: 16
+  num_workers: 4
+  pin_memory: true
+
+model:
+  name: "event_decoder"
+  d_model: 256
+  nhead: 8
+  num_object_encoder_layers: 3
+  num_context_encoder_layers: 3
+  num_event_decoder_layers: 4
+  num_event_queries: 20
+  max_objects: 30
+  dropout: 0.1
+  d_geo: 12
+  d_pair: 7
+  num_actions: 13
+  embedding_dim: 256
+
+training:
+  epochs: 100
+  learning_rate: 1.0e-4
+  weight_decay: 1.0e-4
+  optimizer: adamw
+  scheduler: cosine_warmup
+  scheduler_params:
+    T_max: 100
+    warmup_epochs: 5
+  grad_clip_norm: 1.0
+  seed: 42
+  device: cuda
+  checkpoint_dir: "data/checkpoints"
+  save_every_n_epochs: 10
+  early_stopping_patience: 10
+
+  # Loss weights
+  loss_weights:
+    interaction: 2.0
+    action: 1.0
+    agent_ptr: 1.0
+    target_ptr: 1.0
+    source_ptr: 0.5
+    dest_ptr: 0.5
+    frame: 0.5
+
+evaluation:
+  metrics:
+    - event_detection_map
+    - action_accuracy
+    - pointer_accuracy
+    - frame_mae
+    - graph_f1
+  eval_every_n_epochs: 1
+
+wandb:
+  enabled: true
+  project: "event_graph_generation"
+  entity: null
+  tags: ["event_decoder"]
+  notes: "Event Decoder training"
