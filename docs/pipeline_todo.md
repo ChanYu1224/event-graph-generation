@@ -661,7 +661,7 @@ class Aligner:
         ...
 ```
 
-### 7.2 `scripts/build_dataset.py` — データセット構築スクリプト
+### 7.2 `scripts/4_build_dataset.py` — データセット構築スクリプト
 
 #### 処理フロー
 

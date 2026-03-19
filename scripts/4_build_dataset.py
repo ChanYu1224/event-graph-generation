@@ -4,7 +4,7 @@ Constructs training samples by aligning VLM annotations to SAM 3 tracks,
 then combining object features, pairwise features, and GT events into .pt files.
 
 Usage:
-    python scripts/build_dataset.py \\
+    python scripts/4_build_dataset.py \\
         --sam3-dir data/sam3_outputs \\
         --annotations-dir data/annotations \\
         --output-dir data/aligned

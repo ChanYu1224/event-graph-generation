@@ -25,7 +25,7 @@ Step 3: アライメント & データセット構築
 ### 実行
 
 ```bash
-uv run python scripts/run_sam3_tracking.py \
+uv run python scripts/2_run_sam3_tracking.py \
   --config configs/sam3.yaml \
   --video-dir data/videos \
   --output-dir data/sam3_outputs \
@@ -70,9 +70,9 @@ uv run python scripts/run_sam3_tracking.py \
 
 ```bash
 # GPU 0
-uv run python scripts/run_sam3_tracking.py --shard-id 0 --num-shards 4
+uv run python scripts/2_run_sam3_tracking.py --shard-id 0 --num-shards 4
 # GPU 1
-uv run python scripts/run_sam3_tracking.py --shard-id 1 --num-shards 4
+uv run python scripts/2_run_sam3_tracking.py --shard-id 1 --num-shards 4
 # ...
 ```
 
@@ -100,7 +100,7 @@ sam3:
 ### 実行
 
 ```bash
-uv run python scripts/generate_annotations.py \
+uv run python scripts/3_generate_annotations.py \
   --config configs/vlm.yaml \
   --video-dir data/videos \
   --output-dir data/annotations \
@@ -182,7 +182,7 @@ SAM 3 の追跡結果と VLM のアノテーションを結合し、学習用デ
 ### 実行
 
 ```bash
-uv run python scripts/build_dataset.py \
+uv run python scripts/4_build_dataset.py \
   --sam3-dir data/sam3_outputs \
   --annotations-dir data/annotations \
   --output-dir data/aligned \

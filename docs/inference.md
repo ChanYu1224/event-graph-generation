@@ -133,10 +133,10 @@ graph = build_event_graph(
 
 dict リストから `ObjectNode` と `EventEdge` を構築し、`EventGraph` を返す。
 
-## CLI エントリポイント (`scripts/run_inference.py`)
+## CLI エントリポイント (`scripts/7_run_inference.py`)
 
 ```bash
-uv run python scripts/run_inference.py \
+uv run python scripts/7_run_inference.py \
   --config configs/inference.yaml \
   --video data/raw/video.mp4 \
   --checkpoint data/checkpoints/best.pt \

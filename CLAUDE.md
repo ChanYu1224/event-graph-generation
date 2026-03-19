@@ -19,18 +19,22 @@ uv run pytest                                # 全テスト
 uv run pytest tests/test_config.py           # 特定ファイル
 uv run pytest -k test_accuracy               # パターン指定
 
+# データセット構築パイプライン（番号順に実行）
+uv run python scripts/1_resize_videos.py --input-dir data/mp4 --output-dir data/resized
+uv run python scripts/2_run_sam3_tracking.py --config configs/sam3.yaml --video-dir data/mp4
+uv run python scripts/3_generate_annotations.py --config configs/vlm.yaml --video-dir data/raw/
+uv run python scripts/4_build_dataset.py --config configs/training.yaml
+
 # 学習（Event Decoder）
-uv run python scripts/train.py --config configs/training.yaml
-uv run python scripts/train.py --config configs/training.yaml --override configs/experiment/event_decoder_v1.yaml
-uv run python scripts/train.py --config configs/training.yaml --resume data/checkpoints/epoch_0050.pt
+uv run python scripts/5_train.py --config configs/training.yaml
+uv run python scripts/5_train.py --config configs/training.yaml --override configs/experiment/event_decoder_v1.yaml
+uv run python scripts/5_train.py --config configs/training.yaml --resume data/checkpoints/epoch_0050.pt
+
+# 評価
+uv run python scripts/6_evaluate.py --config configs/training.yaml --checkpoint data/checkpoints/best.pt
 
 # 推論（End-to-End: 動画 → EventGraph JSON）
-uv run python scripts/run_inference.py --config configs/inference.yaml --video data/raw/video.mp4
-
-# データセット構築パイプライン（順に実行）
-uv run python scripts/run_sam3_tracking.py --config configs/sam3.yaml --video-dir data/raw/
-uv run python scripts/generate_annotations.py --config configs/vlm.yaml --video-dir data/raw/
-uv run python scripts/build_dataset.py --config configs/training.yaml
+uv run python scripts/7_run_inference.py --config configs/inference.yaml --video data/raw/video.mp4
 
 # VRAMベンチマーク
 uv run python scripts/benchmark_vram.py

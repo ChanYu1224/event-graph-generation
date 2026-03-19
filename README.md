@@ -97,7 +97,7 @@ uv sync
 ### 推論（動画 → EventGraph）
 
 ```bash
-uv run python scripts/run_inference.py \
+uv run python scripts/7_run_inference.py \
   --config configs/inference.yaml \
   --video data/raw/video.mp4 \
   --checkpoint data/checkpoints/best.pt \
@@ -121,18 +121,23 @@ uv run python scripts/run_inference.py \
 学習データの構築は以下の 3 ステップで行います。
 
 ```bash
-# 1. SAM 3 によるオブジェクト追跡
-uv run python scripts/run_sam3_tracking.py \
-  --config configs/sam3.yaml \
-  --video-dir data/raw/
+# 1. 動画リサイズ（SAM 3 解像度に合わせる）
+uv run python scripts/1_resize_videos.py \
+  --input-dir data/mp4 \
+  --output-dir data/resized
 
-# 2. VLM による合成アノテーション生成
-uv run python scripts/generate_annotations.py \
+# 2. SAM 3 によるオブジェクト追跡
+uv run python scripts/2_run_sam3_tracking.py \
+  --config configs/sam3.yaml \
+  --video-dir data/mp4
+
+# 3. VLM による合成アノテーション生成
+uv run python scripts/3_generate_annotations.py \
   --config configs/vlm.yaml \
   --video-dir data/raw/
 
-# 3. アライメント + データセット構築
-uv run python scripts/build_dataset.py \
+# 4. アライメント + データセット構築
+uv run python scripts/4_build_dataset.py \
   --config configs/training.yaml
 ```
 
@@ -151,15 +156,15 @@ uv run python scripts/build_dataset.py \
 
 ```bash
 # 基本
-uv run python scripts/train.py --config configs/training.yaml
+uv run python scripts/5_train.py --config configs/training.yaml
 
 # 実験オーバーライド付き
-uv run python scripts/train.py \
+uv run python scripts/5_train.py \
   --config configs/training.yaml \
   --override configs/experiment/event_decoder_v1.yaml
 
 # 学習再開
-uv run python scripts/train.py \
+uv run python scripts/5_train.py \
   --config configs/training.yaml \
   --resume data/checkpoints/epoch_0050.pt
 ```
@@ -187,7 +192,7 @@ uv run pytest -k test_accuracy        # パターン指定
 
 ```bash
 # configs/training.yaml をベースに、experiment 設定を上書き
-uv run python scripts/train.py \
+uv run python scripts/5_train.py \
   --config configs/training.yaml \
   --override configs/experiment/event_decoder_v1.yaml
 ```
@@ -228,13 +233,16 @@ src/event_graph_generation/
 └── utils/             # シード固定, ロギング, チェックポイント I/O
 
 scripts/
-├── train.py                  # 学習エントリポイント
-├── run_inference.py          # 推論エントリポイント
-├── run_sam3_tracking.py      # SAM 3 トラッキング実行
-├── generate_annotations.py   # VLM アノテーション生成
-├── build_dataset.py          # アライメント + データセット構築
+├── 1_resize_videos.py        # 動画リサイズ（SAM 3 解像度）
+├── 2_run_sam3_tracking.py    # SAM 3 トラッキング実行
+├── 3_generate_annotations.py # VLM アノテーション生成
+├── 4_build_dataset.py        # アライメント + データセット構築
+├── 5_train.py                # 学習エントリポイント
+├── 6_evaluate.py             # 評価エントリポイント
+├── 7_run_inference.py        # 推論エントリポイント
 ├── benchmark_vram.py         # VRAM ベンチマーク
-└── *.sh                      # SLURM バッチジョブスクリプト
+├── slurm/                    # SLURM sbatch 用シェルスクリプト
+└── local/                    # ローカル実行用シェルスクリプト
 
 configs/
 ├── training.yaml             # 学習設定
