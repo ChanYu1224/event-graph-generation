@@ -1,4 +1,4 @@
-# SAM 3 configuration - Kitchen domain
+# SAM 3 configuration - Room domain
 sam3:
   model_size: "large"
   device: "cuda"
@@ -8,22 +8,20 @@ sam3:
   concept_prompts:
     - "person"
     - "hand"
-    - "knife"
-    - "cutting board"
-    - "pan"
-    - "pot"
-    - "plate"
+    - "laptop"
+    - "tablet"
+    - "monitor"
+    - "keyboard"
+    - "mouse"
     - "cup"
-    - "bottle"
-    - "spoon"
-    - "chopsticks"
-    - "sink"
-    - "stove"
-    - "fridge"
-    - "trash can"
-    - "food"
-    - "bag"
-    - "container"
+    - "pen"
+    - "notebook"
+    - "book"
+    - "bookshelf"
+    - "desk"
+    - "drawer"
+    - "chair"
+    - "phone"
   sample_rate: 4
   output_dir: "data/sam3_outputs"
   resize_max_side: 1008
