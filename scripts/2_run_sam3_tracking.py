@@ -1,17 +1,12 @@
 """Batch SAM 3 tracking script with resume support.
 
 Usage:
-    # From pre-extracted frames (recommended — low RAM usage):
-    python scripts/2_run_sam3_tracking.py --config configs/sam3.yaml --frames-dir data/frames/room --output-dir data/sam3_outputs --resume
-
-    # From video files directly (legacy — high RAM usage):
-    python scripts/2_run_sam3_tracking.py --config configs/sam3.yaml --video-dir data/videos --output-dir data/sam3_outputs --resume
+    python scripts/2_run_sam3_tracking.py --config configs/sam3.yaml --video-dir data/resized --output-dir data/sam3_outputs --resume
 """
 
 from __future__ import annotations
 
 import argparse
-import json
 import logging
 from pathlib import Path
 
@@ -37,14 +32,8 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--video-dir",
         type=str,
-        default=None,
-        help="Directory containing video files (legacy mode, high RAM usage).",
-    )
-    parser.add_argument(
-        "--frames-dir",
-        type=str,
-        default=None,
-        help="Directory containing pre-extracted frames (from 1b_extract_frames.py). Recommended.",
+        default="data/resized",
+        help="Directory containing video files.",
     )
     parser.add_argument(
         "--output-dir",
@@ -95,62 +84,6 @@ def discover_videos(video_dir: str) -> list[Path]:
     )
     logger.info("Discovered %d video files in %s", len(videos), video_dir)
     return videos
-
-
-def discover_frame_dirs(frames_dir: str) -> list[Path]:
-    """Find all frame directories (containing metadata.json) in the given directory."""
-    frames_dir_path = Path(frames_dir)
-    if not frames_dir_path.exists():
-        logger.error("Frames directory does not exist: %s", frames_dir)
-        return []
-
-    dirs = sorted(
-        p.parent for p in frames_dir_path.glob("*/metadata.json")
-    )
-    logger.info("Discovered %d frame directories in %s", len(dirs), frames_dir)
-    return dirs
-
-
-def load_extracted_frames(
-    frame_dir: Path,
-) -> tuple[list[np.ndarray], list[int]]:
-    """Load pre-extracted frames from a directory with metadata.json.
-
-    Reads JPEG files one at a time to keep memory usage proportional to
-    the number of extracted frames (not the full video).
-
-    Args:
-        frame_dir: Directory containing frame_*.jpg and metadata.json.
-
-    Returns:
-        Tuple of (frames, frame_indices).
-    """
-    metadata_path = frame_dir / "metadata.json"
-    with open(metadata_path) as f:
-        metadata = json.load(f)
-
-    frame_indices: list[int] = metadata["frame_indices"]
-    frame_filenames: list[str] | None = metadata.get("frame_filenames")
-    frames: list[np.ndarray] = []
-
-    for i, idx in enumerate(frame_indices):
-        if frame_filenames is not None:
-            filename = frame_filenames[i]
-        else:
-            filename = f"frame_{idx:06d}.jpg"
-        filepath = frame_dir / filename
-        frame = cv2.imread(str(filepath))
-        if frame is None:
-            logger.warning("Failed to read frame: %s", filepath)
-            continue
-        frames.append(frame)
-
-    logger.info(
-        "Loaded %d frames from %s",
-        len(frames),
-        frame_dir.name,
-    )
-    return frames, frame_indices
 
 
 def read_video_frames(
@@ -210,29 +143,19 @@ def main() -> None:
     # sam3.yaml wraps settings under a "sam3:" key; unwrap if present
     config = raw_config.get("sam3", raw_config)
 
-    # Determine input mode: --frames-dir (recommended) or --video-dir (legacy)
-    use_frames_dir = args.frames_dir is not None
-    if not use_frames_dir and args.video_dir is None:
-        logger.error("Either --frames-dir or --video-dir must be specified.")
-        return
-
     output_dir = Path(args.output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
 
-    # Discover inputs
-    if use_frames_dir:
-        inputs = discover_frame_dirs(args.frames_dir)
-    else:
-        inputs = discover_videos(args.video_dir)
-
-    if not inputs:
-        logger.error("No inputs found. Exiting.")
+    # Discover videos
+    videos = discover_videos(args.video_dir)
+    if not videos:
+        logger.error("No video files found. Exiting.")
         return
 
     # Shard for multi-GPU parallel processing
     if args.shard_id is not None and args.num_shards is not None:
-        inputs = [v for i, v in enumerate(inputs) if i % args.num_shards == args.shard_id]
-        logger.info("Shard %d/%d: processing %d inputs", args.shard_id, args.num_shards, len(inputs))
+        videos = [v for i, v in enumerate(videos) if i % args.num_shards == args.shard_id]
+        logger.info("Shard %d/%d: processing %d videos", args.shard_id, args.num_shards, len(videos))
 
     # Initialize tracker
     model_size = config.get("model_size", "large")
@@ -246,28 +169,24 @@ def main() -> None:
     tracker = SAM3Tracker(model_size=model_size, device=device)
     tracker.set_concept_prompts(concept_prompts)
 
-    # Process inputs
-    for input_path in tqdm(inputs, desc="Processing"):
-        video_id = input_path.stem if not use_frames_dir else input_path.name
+    # Process videos
+    for video_path in tqdm(videos, desc="Processing videos"):
+        video_id = video_path.stem
         output_path = output_dir / f"{video_id}.pt"
 
         # Resume: skip already processed
         if args.resume and output_path.exists():
-            logger.info("Skipping already-processed: %s", video_id)
+            logger.info("Skipping already-processed video: %s", video_id)
             continue
 
-        logger.info("Processing: %s", input_path)
+        logger.info("Processing video: %s", video_path)
 
-        # Load frames
-        if use_frames_dir:
-            frames, frame_indices = load_extracted_frames(input_path)
-        else:
-            frames, frame_indices = read_video_frames(
-                input_path, max_frames=max_frames, sample_rate=sample_rate
-            )
-
+        # Read frames
+        frames, frame_indices = read_video_frames(
+            video_path, max_frames=max_frames, sample_rate=sample_rate
+        )
         if not frames:
-            logger.warning("No frames loaded from %s, skipping.", input_path)
+            logger.warning("No frames read from %s, skipping.", video_path)
             continue
 
         # Determine image_size from config or actual frame dimensions
@@ -278,12 +197,6 @@ def main() -> None:
             image_size = (actual_h, actual_w)
             logger.info("Using actual frame size: %dx%d", actual_w, actual_h)
 
-        extractor = FeatureExtractor(
-            temporal_window=temporal_window,
-            normalize_coords=True,
-            image_size=image_size,
-        )
-
         # Run SAM 3 tracking
         try:
             tracking_results = tracker.track_video(frames, frame_indices)
@@ -291,13 +204,23 @@ def main() -> None:
             logger.error("Tracking failed for %s: %s", video_id, e)
             continue
 
+        if not tracking_results:
+            logger.warning("No tracking results for %s, skipping.", video_id)
+            continue
+
+        extractor = FeatureExtractor(
+            temporal_window=temporal_window,
+            normalize_coords=True,
+            image_size=image_size,
+        )
+
         # Extract features
         object_features, pairwise_features = extractor.extract(tracking_results)
 
         # Save results
         save_data = {
             "video_id": video_id,
-            "video_path": str(input_path),
+            "video_path": str(video_path),
             "frame_indices": frame_indices,
             "tracking_results": tracking_results,
             "object_features": object_features,
@@ -306,7 +229,7 @@ def main() -> None:
         torch.save(save_data, output_path)
         logger.info("Saved tracking output to %s", output_path)
 
-    logger.info("Done. Processed outputs saved to %s", output_dir)
+    logger.info("Done. Processed videos saved to %s", output_dir)
 
 
 if __name__ == "__main__":
