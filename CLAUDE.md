@@ -11,34 +11,43 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 **すべてのPython実行は `uv run` 経由で行うこと。** 仮想環境の手動activateは不要。
 
 ```bash
-# 依存関係インストール
-uv sync
+uv sync                    # 依存関係インストール
+uv run pytest              # 全テスト（-k でパターン指定可）
+```
 
-# テスト
-uv run pytest                                # 全テスト
-uv run pytest tests/test_config.py           # 特定ファイル
-uv run pytest -k test_accuracy               # パターン指定
+データセット構築パイプラインは `scripts/{1..7}_*.py` の番号順に実行。共通フラグ:
+- `--config` / `--override`: YAML設定の指定と実験オーバーライド（深いマージ）
+- `--resume`: 処理済みスキップ（バッチ処理ステージ）
+- `--shard-id` / `--num-shards`: マルチGPU並列化（script 2）
 
-# データセット構築パイプライン（番号順に実行）
-uv run python scripts/1_resize_videos.py --input-dir data/mp4 --output-dir data/resized
-uv run python scripts/2_run_sam3_tracking.py --config configs/sam3.yaml --video-dir data/mp4
-uv run python scripts/3_generate_annotations.py --config configs/vlm.yaml --video-dir data/raw/
-uv run python scripts/4_build_dataset.py --config configs/training.yaml
-
-# 学習（Event Decoder）
-uv run python scripts/5_train.py --config configs/training.yaml
+```bash
+uv run python scripts/2_run_sam3_tracking.py --config configs/sam3_kitchen.yaml --video-dir data/mp4
 uv run python scripts/5_train.py --config configs/training.yaml --override configs/experiment/event_decoder_v1.yaml
 uv run python scripts/5_train.py --config configs/training.yaml --resume data/checkpoints/epoch_0050.pt
-
-# 評価
-uv run python scripts/6_evaluate.py --config configs/training.yaml --checkpoint data/checkpoints/best.pt
-
-# 推論（End-to-End: 動画 → EventGraph JSON）
-uv run python scripts/7_run_inference.py --config configs/inference.yaml --video data/raw/video.mp4
-
-# VRAMベンチマーク
-uv run python scripts/benchmark_vram.py
 ```
+
+- `data/` は共有ストレージ (`/share/koi_hackathon/data`) へのシンボリックリンク
+- `scripts/local/` と `scripts/slurm/` に各ステージのシェルラッパーあり
+
+## Coding Conventions
+
+- `from __future__ import annotations` を全モジュール先頭に記載
+- 型ヒント: `X | None` を使用（`Optional[X]` は使わない）
+- PEP 257 docstring: 全public関数に `Args:` / `Returns:` セクション付き
+- ロギング: `logger = logging.getLogger(__name__)` を全モジュールで使用、`%s` 形式を推奨
+- インポート: src内は相対インポート（`from .heads import PredictionHead`）、テスト・スクリプトは絶対インポート
+- データ構造: 内部データは `@dataclass`、VLM外部出力バリデーション (`schemas/vlm_output.py`) のみ Pydantic `BaseModel`
+- 命名: `snake_case`（関数/変数）、`CamelCase`（クラス）、`_private`（内部メソッド）、`UPPERCASE`（定数）
+
+## Testing Conventions
+
+- テストファイル: `tests/test_<module_name>.py`
+- テストデータ: `_make_*()` ヘルパー関数（`**kwargs` でデフォルトオーバーライド）
+- テストクラス: 関連テストをクラスでグループ化（`TestBboxConversion` 等）
+- Fixture: `@pytest.fixture` はインフラ用（`extractor` 等）、データ生成は `_make_*()` で
+- 浮動小数点比較: `pytest.approx()`
+- GPU不要: 全テストCPU上で小さい次元のsyntheticデータで実行
+- conftest.py なし: fixture はテストファイルごとにローカル定義
 
 ## Architecture
 
@@ -72,20 +81,9 @@ src/event_graph_generation/
 └── utils/             # seed_everything, setup_logging, save/load_checkpoint
 ```
 
-### Event Decoder Model (DETR-style)
+### Event Decoder Model
 
-入力: object_embeddings `(B,K,D_emb)` + object_temporal `(B,K,T,D_geo)` + pairwise `(B,K,K,T,D_pair)` + object_mask `(B,K)`
-
-処理: Temporal Encoder → Context Encoder (self-attention) → Event Decoder (cross-attention, learnable event queries M個)
-
-出力 (7つの予測ヘッド):
-- `interaction` (M,1): 有効なイベントか (BCE)
-- `action` (M,A): アクション分類 (CE) — 13クラス (`configs/actions.yaml`)
-- `agent_ptr`, `target_ptr` (M,K): オブジェクトスロットへのポインタ (CE)
-- `source_ptr`, `dest_ptr` (M,K+1): コンテナへのポインタ (+1は"none") — アクション依存で任意
-- `frame` (M,T): イベント発生フレーム分類 (CE)
-
-学習時はHungarian Matchingで予測↔GTの最適割当を行い、未マッチの予測はno_eventとして扱う。
+Temporal Encoder → Context Encoder (self-attention) → Event Decoder (cross-attention, learnable event queries M個) → 7つの予測ヘッド (interaction, action, agent/target/source/dest pointers, frame)。学習時はHungarian Matchingで予測↔GTの最適割当。詳細は `models/event_decoder.py` のdocstringを参照。
 
 ## Design Patterns
 
@@ -95,23 +93,31 @@ src/event_graph_generation/
 - **Set Prediction**: 固定M個のevent queries、Hungarian Matching、非自己回帰
 - **Sliding Window**: 推論時にclip_length/clip_strideでオーバーラップ処理 + NMS重複排除
 
+## Design Decisions
+
+コードから明らかでない重要な判断:
+
+- **オプショナル依存**: `try/except ImportError` + `_SAM3_AVAILABLE` / `_WANDB_AVAILABLE` フラグパターン。未インストールでもgraceful degradation
+- **Config追加**: dataclass にフィールド追加 → `_from_dict()` でネストdataclass対応。`configs/default.yaml` がベース設定
+- **`build_model()` ファクトリ** (`models/base.py`): `config.name` でディスパッチ、遅延インポート。新モデル追加時ここに登録
+- **ポインタヘッドの K+1 規約**: `source_ptr`/`dest_ptr` は `(M, K+1)` で最後のスロットが "none"（アクション依存で任意）
+- **`__init__.py` エクスポート**: `schemas/`, `tracking/`, `annotation/`, `inference/` は明示的 `__all__`、他は最小限
+
 ## Configuration
 
-- `configs/training.yaml` — Event Decoder学習ハイパーパラメータ（ベース設定）
+- `configs/default.yaml` — ベースデフォルト設定
+- `configs/training.yaml` — Event Decoder学習ハイパーパラメータ
 - `configs/inference.yaml` — 推論パイプライン設定（SAM3, clip, NMS）
 - `configs/vlm.yaml` — Qwen 3.5 VLMモデル設定
-- `configs/sam3.yaml` — SAM3トラッキング設定 + concept_prompts
-- `configs/actions.yaml` — アクション語彙定義（13クラス、各アクションにsource/destination要否フラグ）
+- `configs/sam3.yaml` — SAM3トラッキングベース設定
+- `configs/sam3_kitchen.yaml`, `sam3_desk.yaml`, `sam3_room.yaml` — ドメイン別SAM3設定
+- `configs/actions.yaml` — アクション語彙定義（13クラス、source/destination要否フラグ）
 - `configs/experiment/` — 実験ごとのオーバーライド（`--override`で深いマージ）
 
 ## Key Dependencies
 
-- **uv** でパッケージ管理、Python >= 3.13
-- torch >= 2.10, transformers (git main), accelerate
-- pydantic >= 2.0（VLM出力のスキーマバリデーション）
-- scipy（Hungarian Matching: `linear_sum_assignment`）
-- opencv-python（フレーム抽出）
-- wandb（実験追跡）、bitsandbytes（量子化）
+- `transformers` は PyPI リリースではなく git main からインストール（`pyproject.toml` 参照）
+- `sam3` は `try/except` でオプショナル扱い（未インストールでもテスト・他機能は動作）
 
 ## Data Format
 
