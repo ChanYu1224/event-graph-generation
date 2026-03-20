@@ -20,6 +20,9 @@ dependencies = [
     "sam3>=0.1.3",
 ]
 
+# vllm is an optional dependency for the VLLM backend (install separately: pip install vllm>=0.11.0)
+# Not declared in [project.optional-dependencies] due to conflicts with transformers from git main.
+
 [dependency-groups]
 dev = [
     "pytest>=9.0.2",

@@ -12,6 +12,13 @@ import torch
 from PIL import Image
 from transformers import AutoModelForImageTextToText, AutoProcessor
 
+try:
+    from vllm import LLM, SamplingParams
+
+    _VLLM_AVAILABLE = True
+except ImportError:
+    _VLLM_AVAILABLE = False
+
 from event_graph_generation.annotation.prompts import build_prompt
 from event_graph_generation.data.frame_sampler import FrameSampler
 from event_graph_generation.schemas.vlm_output import VLMAnnotation
@@ -33,6 +40,12 @@ class VLMAnnotator:
         quantization: str = "none",
         bnb_4bit_quant_type: str = "nf4",
         bnb_4bit_use_double_quant: bool = True,
+        backend: str = "transformers",
+        tensor_parallel_size: int = 1,
+        gpu_memory_utilization: float = 0.90,
+        max_model_len: int = 32768,
+        max_num_seqs: int = 5,
+        limit_mm_per_prompt: int = 16,
     ) -> None:
         """Initialize VLM annotator with model and processor.
 
@@ -46,11 +59,18 @@ class VLMAnnotator:
             quantization: Quantization mode ("none", "4bit", "8bit").
             bnb_4bit_quant_type: 4-bit quantization type (e.g. "nf4", "fp4").
             bnb_4bit_use_double_quant: Whether to use double quantization.
+            backend: Inference backend ("transformers" or "vllm").
+            tensor_parallel_size: Number of GPUs for VLLM tensor parallelism.
+            gpu_memory_utilization: GPU memory fraction for VLLM.
+            max_model_len: Maximum model context length for VLLM.
+            max_num_seqs: Maximum concurrent sequences for VLLM.
+            limit_mm_per_prompt: Maximum images per prompt for VLLM.
         """
         self.model_name = model_name
         self.max_new_tokens = max_new_tokens
         self.temperature = temperature
         self.thinking = thinking
+        self.backend = backend
 
         dtype_map = {
             "bfloat16": torch.bfloat16,
@@ -59,35 +79,66 @@ class VLMAnnotator:
         }
         resolved_dtype = dtype_map.get(torch_dtype, torch.bfloat16)
 
-        model_kwargs: dict = {
-            "dtype": resolved_dtype,
-            "device_map": device_map,
-            "attn_implementation": "sdpa",
-        }
-
-        if quantization == "4bit":
-            from transformers import BitsAndBytesConfig
-
-            model_kwargs["quantization_config"] = BitsAndBytesConfig(
-                load_in_4bit=True,
-                bnb_4bit_compute_dtype=resolved_dtype,
-                bnb_4bit_quant_type=bnb_4bit_quant_type,
-                bnb_4bit_use_double_quant=bnb_4bit_use_double_quant,
-            )
-        elif quantization == "8bit":
-            from transformers import BitsAndBytesConfig
-
-            model_kwargs["quantization_config"] = BitsAndBytesConfig(
-                load_in_8bit=True,
+        if backend not in ("transformers", "vllm"):
+            raise ValueError(
+                f"Unknown backend: {backend!r}. Must be 'transformers' or 'vllm'."
             )
 
-        logger.info("Loading model: %s (dtype=%s, quantization=%s)", model_name, torch_dtype, quantization)
-        self.processor = AutoProcessor.from_pretrained(model_name)
-        self.model = AutoModelForImageTextToText.from_pretrained(
-            model_name,
-            **model_kwargs,
-        )
-        logger.info("Model loaded successfully")
+        if backend == "vllm":
+            if not _VLLM_AVAILABLE:
+                raise ImportError(
+                    "vllm is required for the 'vllm' backend. "
+                    "Install with: pip install vllm"
+                )
+            logger.info(
+                "Loading model with VLLM: %s (dtype=%s, tp=%d)",
+                model_name, torch_dtype, tensor_parallel_size,
+            )
+            self.processor = AutoProcessor.from_pretrained(model_name)
+            self.llm = LLM(
+                model=model_name,
+                tensor_parallel_size=tensor_parallel_size,
+                gpu_memory_utilization=gpu_memory_utilization,
+                max_model_len=max_model_len,
+                max_num_seqs=max_num_seqs,
+                limit_mm_per_prompt={"image": limit_mm_per_prompt},
+                dtype=resolved_dtype,
+            )
+            self.sampling_params = SamplingParams(
+                temperature=temperature,
+                max_tokens=max_new_tokens,
+            )
+            logger.info("VLLM model loaded successfully")
+        else:
+            model_kwargs: dict = {
+                "dtype": resolved_dtype,
+                "device_map": device_map,
+                "attn_implementation": "sdpa",
+            }
+
+            if quantization == "4bit":
+                from transformers import BitsAndBytesConfig
+
+                model_kwargs["quantization_config"] = BitsAndBytesConfig(
+                    load_in_4bit=True,
+                    bnb_4bit_compute_dtype=resolved_dtype,
+                    bnb_4bit_quant_type=bnb_4bit_quant_type,
+                    bnb_4bit_use_double_quant=bnb_4bit_use_double_quant,
+                )
+            elif quantization == "8bit":
+                from transformers import BitsAndBytesConfig
+
+                model_kwargs["quantization_config"] = BitsAndBytesConfig(
+                    load_in_8bit=True,
+                )
+
+            logger.info("Loading model: %s (dtype=%s, quantization=%s)", model_name, torch_dtype, quantization)
+            self.processor = AutoProcessor.from_pretrained(model_name)
+            self.model = AutoModelForImageTextToText.from_pretrained(
+                model_name,
+                **model_kwargs,
+            )
+            logger.info("Model loaded successfully")
 
     def annotate_clip(
         self,
@@ -137,33 +188,11 @@ class VLMAnnotator:
             {"role": "user", "content": content},
         ]
 
-        # Tokenize
-        text = self.processor.apply_chat_template(
-            messages,
-            tokenize=False,
-            add_generation_prompt=True,
-            enable_thinking=self.thinking,
-        )
-        inputs = self.processor(
-            text=[text],
-            images=pil_images,
-            return_tensors="pt",
-        ).to(self.model.device)
-        inputs.pop("token_type_ids", None)
-
-        # Generate
-        with torch.inference_mode():
-            output_ids = self.model.generate(
-                **inputs,
-                max_new_tokens=self.max_new_tokens,
-                temperature=self.temperature,
-                do_sample=self.temperature > 0,
-            )
-
-        # Decode generated tokens only
-        input_len = inputs["input_ids"].shape[1]
-        generated_ids = output_ids[0, input_len:]
-        raw_output = self.processor.decode(generated_ids, skip_special_tokens=True)
+        # Generate text via selected backend
+        if self.backend == "vllm":
+            raw_output = self._generate_vllm(messages, pil_images)
+        else:
+            raw_output = self._generate_transformers(messages, pil_images)
 
         logger.debug("Raw VLM output for %s: %s", video_id, raw_output[:200])
 
@@ -187,6 +216,67 @@ class VLMAnnotator:
             annotation = VLMAnnotation()
 
         return annotation
+
+    def _generate_transformers(
+        self, messages: list[dict], pil_images: list[Image.Image],
+    ) -> str:
+        """Generate text using the transformers backend.
+
+        Args:
+            messages: Chat messages for the model.
+            pil_images: List of PIL images for the prompt.
+
+        Returns:
+            Raw decoded text from the model.
+        """
+        text = self.processor.apply_chat_template(
+            messages,
+            tokenize=False,
+            add_generation_prompt=True,
+            enable_thinking=self.thinking,
+        )
+        inputs = self.processor(
+            text=[text],
+            images=pil_images,
+            return_tensors="pt",
+        ).to(self.model.device)
+        inputs.pop("token_type_ids", None)
+
+        with torch.inference_mode():
+            output_ids = self.model.generate(
+                **inputs,
+                max_new_tokens=self.max_new_tokens,
+                temperature=self.temperature,
+                do_sample=self.temperature > 0,
+            )
+
+        input_len = inputs["input_ids"].shape[1]
+        generated_ids = output_ids[0, input_len:]
+        return self.processor.decode(generated_ids, skip_special_tokens=True)
+
+    def _generate_vllm(
+        self, messages: list[dict], pil_images: list[Image.Image],
+    ) -> str:
+        """Generate text using the VLLM backend.
+
+        Args:
+            messages: Chat messages for the model.
+            pil_images: List of PIL images for the prompt.
+
+        Returns:
+            Raw decoded text from the model.
+        """
+        text = self.processor.apply_chat_template(
+            messages,
+            tokenize=False,
+            add_generation_prompt=True,
+            enable_thinking=self.thinking,
+        )
+        outputs = self.llm.generate(
+            {"prompt": text, "multi_modal_data": {"image": pil_images}},
+            sampling_params=self.sampling_params,
+        )
+        return outputs[0].outputs[0].text
 
     def annotate_video(
         self,

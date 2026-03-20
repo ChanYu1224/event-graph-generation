@@ -1,0 +1,17 @@
+vlm:
+  model_name: "Qwen/Qwen3.5-35B-A3B"
+  backend: "vllm"
+  torch_dtype: "bfloat16"
+  max_new_tokens: 4096
+  temperature: 0.1
+  thinking: false
+  clip_length: 16
+  clip_stride: 8
+  target_fps: 1.0
+  max_retries: 3
+  output_dir: "data/annotations"
+  tensor_parallel_size: 4
+  gpu_memory_utilization: 0.90
+  max_model_len: 32768
+  max_num_seqs: 5
+  limit_mm_per_prompt: 16

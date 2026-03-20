@@ -147,6 +147,12 @@ def main() -> None:
         max_new_tokens=vlm_cfg.get("max_new_tokens", 4096),
         temperature=vlm_cfg.get("temperature", 0.1),
         thinking=vlm_cfg.get("thinking", False),
+        backend=vlm_cfg.get("backend", "transformers"),
+        tensor_parallel_size=vlm_cfg.get("tensor_parallel_size", 1),
+        gpu_memory_utilization=vlm_cfg.get("gpu_memory_utilization", 0.90),
+        max_model_len=vlm_cfg.get("max_model_len", 32768),
+        max_num_seqs=vlm_cfg.get("max_num_seqs", 5),
+        limit_mm_per_prompt=vlm_cfg.get("limit_mm_per_prompt", 16),
     )
 
     # Initialize validator

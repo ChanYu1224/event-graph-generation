@@ -68,6 +68,12 @@ class VLMConfig:
     quantization: str = "none"  # "none", "4bit", "8bit"
     bnb_4bit_quant_type: str = "nf4"
     bnb_4bit_use_double_quant: bool = True
+    backend: str = "transformers"  # "transformers" or "vllm"
+    tensor_parallel_size: int = 1
+    gpu_memory_utilization: float = 0.90
+    max_model_len: int = 32768
+    max_num_seqs: int = 5
+    limit_mm_per_prompt: int = 16
 
 
 @dataclass
