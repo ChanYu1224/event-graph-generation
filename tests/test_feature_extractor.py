@@ -65,44 +65,55 @@ class TestBboxConversion:
         assert h == pytest.approx(0.5)
 
 
-class TestIoU:
-    def test_compute_iou(self, extractor: FeatureExtractor) -> None:
-        """Test IoU with known overlapping boxes."""
-        bbox_a = np.array([0, 0, 10, 10], dtype=np.float32)
-        bbox_b = np.array([5, 5, 15, 15], dtype=np.float32)
+class TestIoUMatrix:
+    def test_compute_iou_matrix(self, extractor: FeatureExtractor) -> None:
+        """Test IoU matrix with known overlapping boxes."""
+        bbox_a = torch.tensor([[0, 0, 10, 10]], dtype=torch.float32)  # (1, 4)
+        bbox_b = torch.tensor([[5, 5, 15, 15]], dtype=torch.float32)  # (1, 4)
+        bboxes = torch.stack([bbox_a, bbox_b])  # (2, 1, 4) -> K=2, T=1
+        iou = FeatureExtractor._compute_iou_matrix(bboxes)
         # Intersection: [5,5,10,10] = 5*5 = 25
         # Union: 100 + 100 - 25 = 175
-        iou = extractor._compute_iou(bbox_a, bbox_b)
-        assert iou == pytest.approx(25.0 / 175.0, abs=1e-6)
+        assert iou[0, 1, 0].item() == pytest.approx(25.0 / 175.0, abs=1e-6)
+        assert iou[1, 0, 0].item() == pytest.approx(25.0 / 175.0, abs=1e-6)
 
-    def test_compute_iou_perfect_overlap(self, extractor: FeatureExtractor) -> None:
+    def test_compute_iou_matrix_perfect_overlap(
+        self, extractor: FeatureExtractor
+    ) -> None:
         """Same box should give IoU = 1."""
-        bbox = np.array([10, 20, 50, 60], dtype=np.float32)
-        iou = extractor._compute_iou(bbox, bbox)
-        assert iou == pytest.approx(1.0, abs=1e-6)
+        bbox = torch.tensor([[10, 20, 50, 60]], dtype=torch.float32)  # (1, 4)
+        bboxes = torch.stack([bbox, bbox])  # (2, 1, 4)
+        iou = FeatureExtractor._compute_iou_matrix(bboxes)
+        assert iou[0, 1, 0].item() == pytest.approx(1.0, abs=1e-6)
 
-    def test_compute_iou_no_overlap(self, extractor: FeatureExtractor) -> None:
+    def test_compute_iou_matrix_no_overlap(
+        self, extractor: FeatureExtractor
+    ) -> None:
         """Non-overlapping boxes should give IoU = 0."""
-        bbox_a = np.array([0, 0, 10, 10], dtype=np.float32)
-        bbox_b = np.array([20, 20, 30, 30], dtype=np.float32)
-        iou = extractor._compute_iou(bbox_a, bbox_b)
-        assert iou == pytest.approx(0.0, abs=1e-6)
+        bbox_a = torch.tensor([[0, 0, 10, 10]], dtype=torch.float32)
+        bbox_b = torch.tensor([[20, 20, 30, 30]], dtype=torch.float32)
+        bboxes = torch.stack([bbox_a, bbox_b])
+        iou = FeatureExtractor._compute_iou_matrix(bboxes)
+        assert iou[0, 1, 0].item() == pytest.approx(0.0, abs=1e-6)
 
 
-class TestContainment:
+class TestContainmentMatrix:
     def test_full_containment(self, extractor: FeatureExtractor) -> None:
         """Inner box fully inside outer should give containment = 1."""
-        inner = np.array([10, 10, 20, 20], dtype=np.float32)
-        outer = np.array([0, 0, 30, 30], dtype=np.float32)
-        c = extractor._compute_containment(inner, outer)
-        assert c == pytest.approx(1.0, abs=1e-6)
+        inner = torch.tensor([[10, 10, 20, 20]], dtype=torch.float32)
+        outer = torch.tensor([[0, 0, 30, 30]], dtype=torch.float32)
+        bboxes = torch.stack([inner, outer])  # (2, 1, 4)
+        c = FeatureExtractor._compute_containment_matrix(bboxes)
+        # containment[0, 1] = inter / area(inner) = 100 / 100 = 1.0
+        assert c[0, 1, 0].item() == pytest.approx(1.0, abs=1e-6)
 
     def test_no_containment(self, extractor: FeatureExtractor) -> None:
         """Non-overlapping boxes should give containment = 0."""
-        inner = np.array([0, 0, 10, 10], dtype=np.float32)
-        outer = np.array([20, 20, 30, 30], dtype=np.float32)
-        c = extractor._compute_containment(inner, outer)
-        assert c == pytest.approx(0.0, abs=1e-6)
+        inner = torch.tensor([[0, 0, 10, 10]], dtype=torch.float32)
+        outer = torch.tensor([[20, 20, 30, 30]], dtype=torch.float32)
+        bboxes = torch.stack([inner, outer])
+        c = FeatureExtractor._compute_containment_matrix(bboxes)
+        assert c[0, 1, 0].item() == pytest.approx(0.0, abs=1e-6)
 
 
 class TestExtractWithSyntheticData:

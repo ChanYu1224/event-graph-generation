@@ -108,14 +108,17 @@ class FeatureExtractor:
 
         # Build per-object features
         object_features: dict[int, ObjectFeatures] = {}
+        bbox_xyxy_dict: dict[int, torch.Tensor] = {}
 
         for tid in sorted(track_ids):
             bbox_seq = torch.zeros(T, 4)
+            bbox_xyxy_seq = torch.zeros(T, 4)
             centroid_seq = torch.zeros(T, 2)
             area_seq = torch.zeros(T, 1)
             presence_seq = torch.zeros(T, 1)
 
             for t_idx, obj in track_data[tid]:
+                bbox_xyxy_seq[t_idx] = torch.tensor(obj.bbox, dtype=torch.float32)
                 cxcywh = self._bbox_xyxy_to_cxcywh(
                     obj.bbox, self.image_h, self.image_w
                 )
@@ -125,6 +128,8 @@ class FeatureExtractor:
                 )
                 area_seq[t_idx, 0] = cxcywh[2] * cxcywh[3]
                 presence_seq[t_idx, 0] = 1.0
+
+            bbox_xyxy_dict[tid] = bbox_xyxy_seq
 
             # Temporal deltas — only valid when both current and previous frame
             # have the object present; otherwise zero to avoid misleading jumps.
@@ -153,57 +158,54 @@ class FeatureExtractor:
                 velocity_seq=velocity_seq,
             )
 
-        # Build pairwise features
+        # Build pairwise features (vectorized)
         pairwise_features: list[PairwiseFeatures] = []
         sorted_ids = sorted(track_ids)
 
-        for tid_i, tid_j in combinations(sorted_ids, 2):
-            iou_seq = torch.zeros(T, 1)
-            distance_seq = torch.zeros(T, 1)
-            containment_ij_seq = torch.zeros(T, 1)
-            containment_ji_seq = torch.zeros(T, 1)
-            relative_position_seq = torch.zeros(T, 2)
+        if len(sorted_ids) >= 2:
+            all_bboxes_xyxy = torch.stack(
+                [bbox_xyxy_dict[tid] for tid in sorted_ids]
+            )  # (K, T, 4)
+            all_centroids = torch.stack(
+                [object_features[tid].centroid_seq for tid in sorted_ids]
+            )  # (K, T, 2)
+            all_presence = torch.stack(
+                [object_features[tid].presence_seq for tid in sorted_ids]
+            )  # (K, T, 1)
 
-            # Build frame-level lookup for each track
-            frames_i = {t_idx: obj for t_idx, obj in track_data[tid_i]}
-            frames_j = {t_idx: obj for t_idx, obj in track_data[tid_j]}
+            # Mask: both objects must be present for valid pairwise features
+            presence_i = all_presence.unsqueeze(1)  # (K, 1, T, 1)
+            presence_j = all_presence.unsqueeze(0)  # (1, K, T, 1)
+            both_present = (presence_i * presence_j).squeeze(-1)  # (K, K, T)
 
-            for t in range(T):
-                if t in frames_i and t in frames_j:
-                    bbox_i = frames_i[t].bbox
-                    bbox_j = frames_j[t].bbox
-
-                    iou_seq[t, 0] = self._compute_iou(bbox_i, bbox_j)
-                    containment_ij_seq[t, 0] = self._compute_containment(
-                        bbox_i, bbox_j
-                    )
-                    containment_ji_seq[t, 0] = self._compute_containment(
-                        bbox_j, bbox_i
-                    )
-
-                    # Centroid distance (normalized)
-                    ci = self._bbox_xyxy_to_cxcywh(
-                        bbox_i, self.image_h, self.image_w
-                    )
-                    cj = self._bbox_xyxy_to_cxcywh(
-                        bbox_j, self.image_h, self.image_w
-                    )
-                    diff = torch.tensor(ci[:2]) - torch.tensor(cj[:2])
-                    distance_seq[t, 0] = torch.norm(diff).item()
-                    relative_position_seq[t, 0] = diff[0].item()
-                    relative_position_seq[t, 1] = diff[1].item()
-
-            pairwise_features.append(
-                PairwiseFeatures(
-                    track_id_i=tid_i,
-                    track_id_j=tid_j,
-                    iou_seq=iou_seq,
-                    distance_seq=distance_seq,
-                    containment_ij_seq=containment_ij_seq,
-                    containment_ji_seq=containment_ji_seq,
-                    relative_position_seq=relative_position_seq,
-                )
+            iou_matrix = self._compute_iou_matrix(all_bboxes_xyxy) * both_present
+            containment_matrix = (
+                self._compute_containment_matrix(all_bboxes_xyxy) * both_present
             )
+
+            diff = (
+                all_centroids.unsqueeze(1) - all_centroids.unsqueeze(0)
+            )  # (K, K, T, 2)
+            distance_matrix = diff.norm(dim=-1) * both_present  # (K, K, T)
+            # Zero out relative position where not both present
+            rel_pos = diff * both_present.unsqueeze(-1)  # (K, K, T, 2)
+
+            for idx_i, idx_j in combinations(range(len(sorted_ids)), 2):
+                pairwise_features.append(
+                    PairwiseFeatures(
+                        track_id_i=sorted_ids[idx_i],
+                        track_id_j=sorted_ids[idx_j],
+                        iou_seq=iou_matrix[idx_i, idx_j].unsqueeze(-1),
+                        distance_seq=distance_matrix[idx_i, idx_j].unsqueeze(-1),
+                        containment_ij_seq=containment_matrix[
+                            idx_i, idx_j
+                        ].unsqueeze(-1),
+                        containment_ji_seq=containment_matrix[
+                            idx_j, idx_i
+                        ].unsqueeze(-1),
+                        relative_position_seq=rel_pos[idx_i, idx_j],
+                    )
+                )
 
         logger.info(
             "Extracted features: %d objects, %d pairs",
@@ -213,69 +215,52 @@ class FeatureExtractor:
         return object_features, pairwise_features
 
     @staticmethod
-    def _compute_iou(bbox_a: np.ndarray, bbox_b: np.ndarray) -> float:
-        """Compute Intersection over Union between two bboxes.
+    def _compute_iou_matrix(bboxes: torch.Tensor) -> torch.Tensor:
+        """Compute pairwise IoU matrix from batched bounding boxes.
 
         Args:
-            bbox_a: Bounding box [x1, y1, x2, y2].
-            bbox_b: Bounding box [x1, y1, x2, y2].
+            bboxes: (K, T, 4) tensor in xyxy format.
 
         Returns:
-            IoU value in [0, 1].
+            (K, K, T) IoU matrix.
         """
-        x1 = max(float(bbox_a[0]), float(bbox_b[0]))
-        y1 = max(float(bbox_a[1]), float(bbox_b[1]))
-        x2 = min(float(bbox_a[2]), float(bbox_b[2]))
-        y2 = min(float(bbox_a[3]), float(bbox_b[3]))
-
-        inter_w = max(0.0, x2 - x1)
-        inter_h = max(0.0, y2 - y1)
-        inter_area = inter_w * inter_h
-
-        area_a = (float(bbox_a[2]) - float(bbox_a[0])) * (
-            float(bbox_a[3]) - float(bbox_a[1])
-        )
-        area_b = (float(bbox_b[2]) - float(bbox_b[0])) * (
-            float(bbox_b[3]) - float(bbox_b[1])
-        )
-
-        union_area = area_a + area_b - inter_area
-        if union_area <= 0:
-            return 0.0
-
-        return inter_area / union_area
+        b1 = bboxes.unsqueeze(1)  # (K, 1, T, 4)
+        b2 = bboxes.unsqueeze(0)  # (1, K, T, 4)
+        inter_x1 = torch.max(b1[..., 0], b2[..., 0])
+        inter_y1 = torch.max(b1[..., 1], b2[..., 1])
+        inter_x2 = torch.min(b1[..., 2], b2[..., 2])
+        inter_y2 = torch.min(b1[..., 3], b2[..., 3])
+        inter = (inter_x2 - inter_x1).clamp(min=0) * (
+            inter_y2 - inter_y1
+        ).clamp(min=0)
+        area1 = (b1[..., 2] - b1[..., 0]) * (b1[..., 3] - b1[..., 1])
+        area2 = (b2[..., 2] - b2[..., 0]) * (b2[..., 3] - b2[..., 1])
+        union = area1 + area2 - inter
+        return inter / union.clamp(min=1e-6)
 
     @staticmethod
-    def _compute_containment(
-        bbox_inner: np.ndarray, bbox_outer: np.ndarray
-    ) -> float:
-        """Compute containment ratio of bbox_inner within bbox_outer.
+    def _compute_containment_matrix(bboxes: torch.Tensor) -> torch.Tensor:
+        """Compute pairwise containment matrix from batched bounding boxes.
 
-        Containment = intersection_area / area_inner.
+        containment[i, j, t] = intersection(i, j) / area(i) at frame t.
 
         Args:
-            bbox_inner: Inner bounding box [x1, y1, x2, y2].
-            bbox_outer: Outer bounding box [x1, y1, x2, y2].
+            bboxes: (K, T, 4) tensor in xyxy format.
 
         Returns:
-            Containment ratio in [0, 1].
+            (K, K, T) containment matrix.
         """
-        x1 = max(float(bbox_inner[0]), float(bbox_outer[0]))
-        y1 = max(float(bbox_inner[1]), float(bbox_outer[1]))
-        x2 = min(float(bbox_inner[2]), float(bbox_outer[2]))
-        y2 = min(float(bbox_inner[3]), float(bbox_outer[3]))
-
-        inter_w = max(0.0, x2 - x1)
-        inter_h = max(0.0, y2 - y1)
-        inter_area = inter_w * inter_h
-
-        area_inner = (float(bbox_inner[2]) - float(bbox_inner[0])) * (
-            float(bbox_inner[3]) - float(bbox_inner[1])
-        )
-        if area_inner <= 0:
-            return 0.0
-
-        return inter_area / area_inner
+        b1 = bboxes.unsqueeze(1)  # (K, 1, T, 4)
+        b2 = bboxes.unsqueeze(0)  # (1, K, T, 4)
+        inter_x1 = torch.max(b1[..., 0], b2[..., 0])
+        inter_y1 = torch.max(b1[..., 1], b2[..., 1])
+        inter_x2 = torch.min(b1[..., 2], b2[..., 2])
+        inter_y2 = torch.min(b1[..., 3], b2[..., 3])
+        inter = (inter_x2 - inter_x1).clamp(min=0) * (
+            inter_y2 - inter_y1
+        ).clamp(min=0)
+        area1 = (b1[..., 2] - b1[..., 0]) * (b1[..., 3] - b1[..., 1])
+        return inter / area1.clamp(min=1e-6)
 
     @staticmethod
     def _bbox_xyxy_to_cxcywh(
