@@ -3,16 +3,19 @@
 from __future__ import annotations
 
 import logging
-from collections.abc import Iterable
+import uuid
+from collections.abc import Sequence
 from dataclasses import dataclass, field
+from pathlib import Path
 
 import numpy as np
 import torch
+from PIL import Image
 
 logger = logging.getLogger(__name__)
 
 try:
-    from sam3 import SAM3
+    from sam3.model.sam3_video_predictor import Sam3VideoPredictor
 
     _SAM3_AVAILABLE = True
 except ImportError:
@@ -46,163 +49,189 @@ class FrameTrackingResult:
 class SAM3Tracker:
     """Wrapper around SAM 3 for video object tracking and segmentation.
 
-    Uses SAM 3's text-prompted segmentation to detect and track objects
-    across video frames.
+    Uses Sam3VideoPredictor's text-prompted grounding to detect and track
+    objects across video frames.
     """
 
     def __init__(self, model_size: str = "large", device: str = "cuda") -> None:
-        """Initialize SAM 3 tracker.
-
-        Args:
-            model_size: SAM 3 model size ('large', 'base', 'small').
-            device: Device to run the model on.
-        """
         self.model_size = model_size
         self.device = device
         self.concept_prompts: list[str] = []
-        self.model: SAM3 | None = None
+        self.predictor: Sam3VideoPredictor | None = None
 
         if _SAM3_AVAILABLE:
-            self.model = SAM3(model_size=model_size, device=device)
-            logger.info("SAM 3 model (%s) loaded on %s", model_size, device)
+            self.predictor = Sam3VideoPredictor()
+            logger.info("Sam3VideoPredictor loaded")
         else:
             logger.warning("SAM 3 not available; model not loaded.")
 
     def set_concept_prompts(self, prompts: list[str]) -> None:
-        """Store concept text prompts for tracking.
-
-        Args:
-            prompts: List of text prompts describing object categories to track
-                (e.g., ["person", "car", "dog"]).
-        """
+        """Store concept text prompts for tracking."""
         self.concept_prompts = list(prompts)
         logger.info("Set %d concept prompts: %s", len(prompts), prompts)
 
+    def _build_text_prompt(self) -> str:
+        """Join concept prompts into a single grounding text string."""
+        return " . ".join(self.concept_prompts)
+
+    def _start_session(self, resource_path) -> str:
+        """Start a SAM3 session with offload_video_to_cpu=True to avoid OOM."""
+        inference_state = self.predictor.model.init_state(
+            resource_path=resource_path,
+            offload_video_to_cpu=True,
+            async_loading_frames=self.predictor.async_loading_frames,
+            video_loader_type=self.predictor.video_loader_type,
+        )
+        session_id = str(uuid.uuid4())
+        self.predictor._ALL_INFERENCE_STATES[session_id] = {
+            "state": inference_state,
+            "session_id": session_id,
+        }
+        return session_id
+
+    def _run_session(
+        self,
+        session_id: str,
+        frame_indices: list[int] | None,
+    ) -> list[FrameTrackingResult]:
+        """Add prompt, propagate, and collect results for a session."""
+        text_prompt = self._build_text_prompt()
+        try:
+            self.predictor.add_prompt(
+                session_id=session_id,
+                frame_idx=0,
+                text=text_prompt,
+            )
+
+            frame_outputs: dict[int, dict] = {}
+            for result in self.predictor.propagate_in_video(
+                session_id=session_id,
+                propagation_direction="forward",
+                start_frame_idx=0,
+                max_frame_num_to_track=None,
+            ):
+                frame_outputs[result["frame_index"]] = result["outputs"]
+        finally:
+            self.predictor.close_session(session_id)
+            torch.cuda.empty_cache()
+
+        num_frames = len(frame_outputs)
+        if frame_indices is None:
+            frame_indices = list(range(num_frames))
+
+        sorted_frame_idxs = sorted(frame_outputs.keys())
+        results: list[FrameTrackingResult] = []
+        for i, sam_frame_idx in enumerate(sorted_frame_idxs):
+            outputs = frame_outputs[sam_frame_idx]
+            original_frame_idx = frame_indices[i] if i < len(frame_indices) else sam_frame_idx
+            tracked_objects = self._parse_frame_output(outputs)
+            results.append(
+                FrameTrackingResult(
+                    frame_index=original_frame_idx,
+                    objects=tracked_objects,
+                )
+            )
+
+        logger.info(
+            "Tracked %d frames, objects per frame: %s",
+            len(results),
+            [len(r.objects) for r in results[:5]],
+        )
+        return results
+
     def track_video(
         self,
-        frames: Iterable[np.ndarray],
-        frame_indices: Iterable[int],
+        frames: Sequence[np.ndarray],
+        frame_indices: list[int] | None = None,
     ) -> list[FrameTrackingResult]:
-        """Process video frames through SAM 3 for object tracking.
-
-        Processes one frame at a time to manage GPU memory. For each frame,
-        detects objects matching the configured concept prompts.
+        """Run SAM 3 tracking on pre-loaded video frames.
 
         Args:
-            frames: Iterable of video frames as numpy arrays (H, W, 3) in BGR or RGB.
-            frame_indices: Corresponding frame indices in the original video.
+            frames: Video frames as numpy arrays (H, W, 3) in BGR format.
+            frame_indices: Original frame indices. If None, 0..N-1.
 
         Returns:
-            List of FrameTrackingResult, one per input frame.
-
-        Raises:
-            RuntimeError: If sam3 is not installed.
+            List of FrameTrackingResult, one per frame.
         """
-        if not _SAM3_AVAILABLE or self.model is None:
+        if not _SAM3_AVAILABLE or self.predictor is None:
             raise RuntimeError(
                 "sam3 is not installed. Cannot run tracking. "
                 "Install sam3 with: pip install sam3"
             )
-
         if not self.concept_prompts:
             logger.warning("No concept prompts set. Call set_concept_prompts() first.")
-            return [
-                FrameTrackingResult(frame_index=idx, objects=[])
-                for idx in frame_indices
-            ]
+            return []
 
-        results: list[FrameTrackingResult] = []
+        # Convert BGR numpy frames to RGB PIL images for sam3
+        pil_frames = [Image.fromarray(f[:, :, ::-1]) for f in frames]
+        session_id = self._start_session(pil_frames)
+        return self._run_session(session_id, frame_indices)
 
-        # Initialize SAM 3 with text prompts
-        self.model.set_text_prompts(self.concept_prompts)
-
-        for frame, frame_idx in zip(frames, frame_indices):
-            logger.debug("Processing frame %d", frame_idx)
-
-            # Run SAM 3 inference on a single frame
-            model_output = self.model.predict(frame)
-
-            tracked_objects: list[TrackedObject] = []
-
-            # Parse SAM 3 output: iterate over detected objects
-            for det_idx, detection in enumerate(model_output.detections):
-                track_id = int(detection.track_id)
-                category = str(detection.category)
-                mask = detection.mask.astype(bool)  # (H, W)
-                bbox = np.array(detection.bbox, dtype=np.float32)  # [x1, y1, x2, y2]
-                score = float(detection.score)
-
-                # Extract embedding from SAM 3 internals
-                embedding = self._extract_embedding(detection)
-
-                tracked_objects.append(
-                    TrackedObject(
-                        track_id=track_id,
-                        category=category,
-                        mask=mask,
-                        bbox=bbox,
-                        score=score,
-                        embedding=embedding,
-                    )
-                )
-
-            results.append(
-                FrameTrackingResult(frame_index=frame_idx, objects=tracked_objects)
-            )
-
-            # Free intermediate GPU tensors
-            if hasattr(model_output, "clear_cache"):
-                model_output.clear_cache()
-
-        logger.info(
-            "Tracked %d frames, found objects: %s",
-            len(results),
-            [len(r.objects) for r in results],
-        )
-        return results
-
-    @staticmethod
-    def _extract_embedding(model_output) -> torch.Tensor:
-        """Extract object embedding from SAM 3's internal representation.
-
-        Attempts to extract the DETR decoder output embedding. Falls back
-        to a zero vector if extraction fails.
+    def track_frame_dir(
+        self,
+        frame_dir: str | Path,
+        frame_indices: list[int] | None = None,
+    ) -> list[FrameTrackingResult]:
+        """Run SAM 3 tracking on a directory of pre-extracted frames.
 
         Args:
-            model_output: A single detection output from SAM 3.
+            frame_dir: Directory containing JPEG frames (sorted lexicographically).
+            frame_indices: Optional list of original frame indices. If None,
+                sequential indices 0..N-1 are used.
 
         Returns:
-            A 256-dimensional embedding tensor.
+            List of FrameTrackingResult, one per frame.
         """
-        try:
-            # SAM 3 stores DETR decoder output in the detection object
-            if hasattr(model_output, "decoder_embedding"):
-                emb = model_output.decoder_embedding
-                if isinstance(emb, np.ndarray):
-                    emb = torch.from_numpy(emb)
-                emb = emb.detach().cpu().float()
-                # Project or truncate/pad to 256 dims
-                if emb.numel() > 256:
-                    emb = emb.flatten()[:256]
-                elif emb.numel() < 256:
-                    padded = torch.zeros(256)
-                    padded[: emb.numel()] = emb.flatten()
-                    emb = padded
-                else:
-                    emb = emb.flatten()
-                return emb
-            elif hasattr(model_output, "embedding"):
-                emb = model_output.embedding
-                if isinstance(emb, np.ndarray):
-                    emb = torch.from_numpy(emb)
-                emb = emb.detach().cpu().float().flatten()
-                if emb.shape[0] != 256:
-                    padded = torch.zeros(256)
-                    n = min(emb.shape[0], 256)
-                    padded[:n] = emb[:n]
-                    emb = padded
-                return emb
-        except Exception:
-            logger.debug("Failed to extract embedding, returning zeros.", exc_info=True)
+        if not _SAM3_AVAILABLE or self.predictor is None:
+            raise RuntimeError(
+                "sam3 is not installed. Cannot run tracking. "
+                "Install sam3 with: pip install sam3"
+            )
+        if not self.concept_prompts:
+            logger.warning("No concept prompts set. Call set_concept_prompts() first.")
+            return []
 
-        return torch.zeros(256)
+        session_id = self._start_session(str(Path(frame_dir)))
+        return self._run_session(session_id, frame_indices)
+
+    @staticmethod
+    def _parse_frame_output(outputs: dict) -> list[TrackedObject]:
+        """Convert Sam3VideoPredictor output dict to TrackedObject list."""
+        obj_ids = outputs.get("out_obj_ids", np.array([]))
+        probs = outputs.get("out_probs", np.array([]))
+        boxes_xywh = outputs.get("out_boxes_xywh", np.zeros((0, 4)))
+        masks = outputs.get("out_binary_masks", np.zeros((0, 0, 0), dtype=bool))
+
+        if len(obj_ids) == 0:
+            return []
+
+        # Get image dimensions from masks for denormalization
+        if masks.ndim == 3 and masks.shape[0] > 0:
+            img_h, img_w = masks.shape[1], masks.shape[2]
+        else:
+            img_h, img_w = 1, 1
+
+        tracked_objects: list[TrackedObject] = []
+        for idx in range(len(obj_ids)):
+            # Convert normalized xywh to pixel xyxy
+            x, y, w, h = boxes_xywh[idx]
+            x1 = x * img_w
+            y1 = y * img_h
+            x2 = (x + w) * img_w
+            y2 = (y + h) * img_h
+            bbox = np.array([x1, y1, x2, y2], dtype=np.float32)
+
+            mask = masks[idx] if idx < len(masks) else np.zeros((img_h, img_w), dtype=bool)
+
+            tracked_objects.append(
+                TrackedObject(
+                    track_id=int(obj_ids[idx]),
+                    category="object",
+                    mask=mask,
+                    bbox=bbox,
+                    score=float(probs[idx]) if idx < len(probs) else 0.0,
+                    embedding=torch.zeros(256),
+                )
+            )
+
+        return tracked_objects
