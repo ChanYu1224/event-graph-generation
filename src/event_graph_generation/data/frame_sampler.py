@@ -63,29 +63,31 @@ class FrameSampler:
         if source_fps <= 0:
             raise RuntimeError("Cannot determine video FPS")
 
-        # Calculate frame interval
+        # Calculate frame interval and target indices
         frame_interval = max(1, round(source_fps / self.target_fps))
+        target_indices = set(range(0, total_frames, frame_interval))
         frames: list[SampledFrame] = []
 
-        frame_idx = 0
-        while frame_idx < total_frames:
-            cap.set(cv2.CAP_PROP_POS_FRAMES, frame_idx)
-            ret, frame = cap.read()
-            if not ret:
-                break
-
-            frames.append(
-                SampledFrame(
-                    image=frame,
-                    frame_index=frame_idx,
-                    timestamp_sec=frame_idx / source_fps,
+        # Sequential read: grab() skips non-target frames without full decode
+        for frame_idx in range(total_frames):
+            if frame_idx in target_indices:
+                ret, frame = cap.read()
+                if not ret:
+                    break
+                frames.append(
+                    SampledFrame(
+                        image=frame,
+                        frame_index=frame_idx,
+                        timestamp_sec=frame_idx / source_fps,
+                    )
                 )
-            )
-            frame_idx += frame_interval
+            else:
+                if not cap.grab():
+                    break
 
         logger.info(
-            f"Sampled {len(frames)} frames from {total_frames} total "
-            f"(source_fps={source_fps:.1f}, target_fps={self.target_fps})"
+            "Sampled %s frames from %s total (source_fps=%.1f, target_fps=%s)",
+            len(frames), total_frames, source_fps, self.target_fps,
         )
         return frames
 
@@ -122,20 +124,29 @@ class FrameSampler:
             frame_interval = max(1, round(source_fps / self.target_fps))
             frames: list[SampledFrame] = []
 
-            for i in range(num_frames):
-                frame_idx = start_frame + i * frame_interval
-                cap.set(cv2.CAP_PROP_POS_FRAMES, frame_idx)
-                ret, frame = cap.read()
-                if not ret:
-                    break
+            # Build target frame indices
+            target_indices = set(
+                start_frame + i * frame_interval for i in range(num_frames)
+            )
+            end_frame = max(target_indices) + 1 if target_indices else start_frame
 
-                frames.append(
-                    SampledFrame(
-                        image=frame,
-                        frame_index=frame_idx,
-                        timestamp_sec=frame_idx / source_fps,
+            # Seek once to start_frame, then read sequentially
+            cap.set(cv2.CAP_PROP_POS_FRAMES, start_frame)
+            for frame_idx in range(start_frame, end_frame):
+                if frame_idx in target_indices:
+                    ret, frame = cap.read()
+                    if not ret:
+                        break
+                    frames.append(
+                        SampledFrame(
+                            image=frame,
+                            frame_index=frame_idx,
+                            timestamp_sec=frame_idx / source_fps,
+                        )
                     )
-                )
+                else:
+                    if not cap.grab():
+                        break
 
             return frames
         finally:

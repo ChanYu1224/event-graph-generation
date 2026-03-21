@@ -96,3 +96,28 @@ class TestFrameSampler:
             assert timestamps == sorted(timestamps)
             if len(timestamps) > 1:
                 assert timestamps[-1] > timestamps[0]
+
+    def test_sample_sequential_read_correctness(self):
+        """Verify sequential read produces correct pixel values per frame index."""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            video_path = Path(tmpdir) / "test.mp4"
+            # Each frame has pixel value = i % 256
+            _create_test_video(str(video_path), num_frames=90, fps=30.0)
+
+            sampler = FrameSampler(target_fps=1.0)
+            frames = sampler.sample(video_path)
+
+            # At 30fps source and 1fps target, interval=30
+            # Expected frame indices: 0, 30, 60
+            assert len(frames) == 3
+            expected_indices = [0, 30, 60]
+            for frame, expected_idx in zip(frames, expected_indices):
+                assert frame.frame_index == expected_idx
+                # Pixel value should be expected_idx % 256
+                # Use mean to be robust to codec compression artifacts
+                expected_val = expected_idx % 256
+                actual_mean = frame.image.mean()
+                assert abs(actual_mean - expected_val) < 10, (
+                    f"Frame {expected_idx}: expected pixel ~{expected_val}, "
+                    f"got mean {actual_mean:.1f}"
+                )
