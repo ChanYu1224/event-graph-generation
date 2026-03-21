@@ -2,6 +2,16 @@
 
 VLM（Qwen 3.5）を使った合成アノテーションの生成、バリデーション、SAM 3 追跡結果とのアライメントを行う。
 
+## 関連設定ファイル
+
+| 設定 | ファイル | 内容 |
+|---|---|---|
+| オブジェクトカテゴリ・属性語彙 | [`configs/vocab.yaml`](../configs/vocab.yaml) | 27 カテゴリ（person, hand, chair, …）＋ 属性軸 6 種（color, material, position, size, state, orientation, pose） |
+| アクション語彙 | [`configs/actions.yaml`](../configs/actions.yaml) | 13 アクション（take_out, put_in, pick_up, …, no_event）＋ source/destination 要否フラグ |
+| VLM (transformers) | [`configs/vlm.yaml`](../configs/vlm.yaml) | Qwen3.5-9B, clip_length=16, clip_stride=8, target_fps=1.0 |
+| VLM (vllm 直接) | [`configs/vlm_vllm.yaml`](../configs/vlm_vllm.yaml) | テンソル並列バックエンド |
+| VLM (vllm-server) | [`configs/vlm_vllm_server.yaml`](../configs/vlm_vllm_server.yaml) | Qwen3.5-35B-A3B, OpenAI 互換 API, motion_filter 有効 |
+
 ## VLMAnnotator (`vlm_annotator.py`)
 
 ローカルで Qwen 3.5 を推論し、動画フレーム列からイベントアノテーションを JSON として生成する。
