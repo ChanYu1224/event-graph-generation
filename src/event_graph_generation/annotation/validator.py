@@ -17,6 +17,7 @@ class AnnotationValidator:
         allowed_actions: list[str],
         allowed_categories: list[str],
         action_config: list[dict] | None = None,
+        attribute_vocab: dict[str, list[str]] | None = None,
     ) -> None:
         """Initialize validator.
 
@@ -25,9 +26,17 @@ class AnnotationValidator:
             allowed_categories: List of valid object category names.
             action_config: List of action config dicts from actions.yaml.
                 Each dict should have 'name', 'requires_source', 'requires_destination'.
+            attribute_vocab: Mapping of axis name to list of allowed values.
+                If provided, object attributes are validated against this vocabulary.
         """
         self.allowed_actions = set(allowed_actions)
         self.allowed_categories = set(allowed_categories)
+
+        # Build attribute vocabulary lookup: axis -> set of allowed values
+        self.attribute_vocab: dict[str, set[str]] = {}
+        if attribute_vocab:
+            for axis, values in attribute_vocab.items():
+                self.attribute_vocab[axis] = set(values)
 
         # Build action requirements lookup
         self.action_requirements: dict[str, dict[str, bool]] = {}
@@ -73,6 +82,31 @@ class AnnotationValidator:
                 warnings.append(msg)
                 logger.warning(msg)
                 # Keep the object but warn (it's still referenceable)
+
+            # Check and auto-fix attribute vocabulary
+            if self.attribute_vocab and obj.attributes:
+                fixed_attrs: dict[str, str | None] = {}
+                for axis, value in obj.attributes.items():
+                    if axis not in self.attribute_vocab:
+                        msg = (
+                            f"Object {obj.obj_id}: removing unknown "
+                            f"attribute axis '{axis}'"
+                        )
+                        warnings.append(msg)
+                        logger.warning(msg)
+                        # Drop the unknown axis (don't add to fixed_attrs)
+                    elif value is not None and value not in self.attribute_vocab[axis]:
+                        msg = (
+                            f"Object {obj.obj_id}: normalizing invalid value "
+                            f"'{value}' to null for attribute axis '{axis}'"
+                        )
+                        warnings.append(msg)
+                        logger.warning(msg)
+                        fixed_attrs[axis] = None
+                    else:
+                        fixed_attrs[axis] = value
+                obj.attributes = fixed_attrs
+
             valid_obj_ids.add(obj.obj_id)
             valid_objects.append(obj)
 
@@ -96,7 +130,7 @@ class AnnotationValidator:
                 event_warnings.append(msg)
                 discard = True
 
-            if event.target not in valid_obj_ids:
+            if event.target is not None and event.target not in valid_obj_ids:
                 msg = f"Event {event.event_id}: target '{event.target}' not in objects"
                 event_warnings.append(msg)
                 discard = True

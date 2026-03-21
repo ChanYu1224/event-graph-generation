@@ -29,6 +29,16 @@ ALLOWED_ACTIONS = [
 
 ALLOWED_CATEGORIES = ["person", "cup", "table", "shelf", "box", "drawer"]
 
+ATTRIBUTE_VOCAB = {
+    "color": ["white", "black", "red", "blue", "green"],
+    "material": ["metal", "plastic", "wooden", "glass", "ceramic"],
+    "position": ["on_floor", "on_desk", "on_shelf"],
+    "size": ["small", "medium", "large"],
+    "state": ["open", "closed", "filled", "empty"],
+    "orientation": ["upright", "tilted", "flat"],
+    "pose": ["standing", "sitting", "crouching"],
+}
+
 ACTION_CONFIG = [
     {"name": "take_out", "requires_source": True, "requires_destination": False},
     {"name": "put_in", "requires_source": False, "requires_destination": True},
@@ -52,6 +62,7 @@ def validator() -> AnnotationValidator:
         allowed_actions=ALLOWED_ACTIONS,
         allowed_categories=ALLOWED_CATEGORIES,
         action_config=ACTION_CONFIG,
+        attribute_vocab=ATTRIBUTE_VOCAB,
     )
 
 
@@ -63,19 +74,19 @@ def _make_valid_annotation() -> VLMAnnotation:
                 obj_id="person_01",
                 category="person",
                 first_seen_frame=0,
-                attributes=["standing"],
+                attributes={"pose": "standing", "color": None},
             ),
             VLMObject(
                 obj_id="cup_01",
                 category="cup",
                 first_seen_frame=3,
-                attributes=["red"],
+                attributes={"color": "red", "material": "ceramic"},
             ),
             VLMObject(
                 obj_id="table_01",
                 category="table",
                 first_seen_frame=0,
-                attributes=["wooden"],
+                attributes={"material": "wooden", "size": "large"},
             ),
         ],
         events=[
@@ -160,13 +171,13 @@ class TestAnnotationValidator:
                     obj_id="person_01",
                     category="person",
                     first_seen_frame=0,
-                    attributes=[],
+                    attributes={},
                 ),
                 VLMObject(
                     obj_id="cup_01",
                     category="cup",
                     first_seen_frame=0,
-                    attributes=[],
+                    attributes={},
                 ),
             ],
             events=[
@@ -202,13 +213,13 @@ class TestAnnotationValidator:
                     obj_id="person_01",
                     category="person",
                     first_seen_frame=0,
-                    attributes=[],
+                    attributes={},
                 ),
                 VLMObject(
                     obj_id="cup_01",
                     category="cup",
                     first_seen_frame=0,
-                    attributes=[],
+                    attributes={},
                 ),
             ],
             events=[
@@ -261,7 +272,7 @@ class TestAnnotationValidator:
                     obj_id="person_01",
                     category="person",
                     first_seen_frame=0,
-                    attributes=[],
+                    attributes={},
                 ),
             ],
             events=[
@@ -291,3 +302,106 @@ class TestAnnotationValidator:
         assert stats["total_events_discarded"] == 1
         assert stats["discard_rate"] == 0.25
         assert stats["total_warnings"] > 0
+
+    def test_event_with_null_target_passes(
+        self, validator: AnnotationValidator,
+    ) -> None:
+        """Events with target=None (e.g. open, close) pass validation."""
+        ann = VLMAnnotation(
+            objects=[
+                VLMObject(
+                    obj_id="person_01",
+                    category="person",
+                    first_seen_frame=0,
+                    attributes={},
+                ),
+                VLMObject(
+                    obj_id="drawer_01",
+                    category="drawer",
+                    first_seen_frame=0,
+                    attributes={},
+                ),
+            ],
+            events=[
+                VLMEvent(
+                    event_id="evt_001",
+                    frame=5,
+                    action="open",
+                    agent="person_01",
+                    target=None,
+                ),
+            ],
+        )
+
+        corrected, warnings = validator.validate(ann)
+
+        assert len(corrected.events) == 1
+        assert corrected.events[0].target is None
+        # No discard warnings for null target
+        assert not any("target" in w and "not in objects" in w for w in warnings)
+
+    def test_invalid_attribute_axis_removed(
+        self, validator: AnnotationValidator,
+    ) -> None:
+        """Unknown attribute axis is removed (auto-fix) and warned."""
+        ann = VLMAnnotation(
+            objects=[
+                VLMObject(
+                    obj_id="cup_01",
+                    category="cup",
+                    first_seen_frame=0,
+                    attributes={"color": "red", "weight": "heavy"},
+                ),
+            ],
+        )
+
+        corrected, warnings = validator.validate(ann)
+
+        assert len(corrected.objects) == 1
+        # Unknown axis removed, valid axis kept
+        assert "weight" not in corrected.objects[0].attributes
+        assert corrected.objects[0].attributes["color"] == "red"
+        assert any("removing unknown attribute axis 'weight'" in w for w in warnings)
+
+    def test_invalid_attribute_value_nullified(
+        self, validator: AnnotationValidator,
+    ) -> None:
+        """Invalid attribute value is normalized to null (auto-fix) and warned."""
+        ann = VLMAnnotation(
+            objects=[
+                VLMObject(
+                    obj_id="cup_01",
+                    category="cup",
+                    first_seen_frame=0,
+                    attributes={"color": "neon_green", "material": "ceramic"},
+                ),
+            ],
+        )
+
+        corrected, warnings = validator.validate(ann)
+
+        assert len(corrected.objects) == 1
+        # Invalid value nullified, valid value kept
+        assert corrected.objects[0].attributes["color"] is None
+        assert corrected.objects[0].attributes["material"] == "ceramic"
+        assert any("normalizing invalid value 'neon_green'" in w for w in warnings)
+
+    def test_null_attribute_value_passes(self, validator: AnnotationValidator) -> None:
+        """Null attribute values are valid (axis not applicable)."""
+        ann = VLMAnnotation(
+            objects=[
+                VLMObject(
+                    obj_id="cup_01",
+                    category="cup",
+                    first_seen_frame=0,
+                    attributes={"color": "red", "pose": None},
+                ),
+            ],
+        )
+
+        corrected, warnings = validator.validate(ann)
+
+        assert len(corrected.objects) == 1
+        # No warnings about attributes
+        attr_warnings = [w for w in warnings if "attribute" in w]
+        assert len(attr_warnings) == 0

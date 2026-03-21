@@ -110,7 +110,7 @@ class TestVLMObject:
             obj_id="person_01",
             category="person",
             first_seen_frame=0,
-            attributes=["blue_gloves"],
+            attributes={"color": "blue"},
         )
         assert obj.obj_id == "person_01"
 
@@ -143,6 +143,16 @@ class TestVLMEvent:
         )
         assert event.action == "take_out"
         assert event.destination is None
+
+    def test_valid_without_target(self):
+        event = VLMEvent(
+            event_id="evt_002",
+            frame=3,
+            action="open",
+            agent="person_01",
+        )
+        assert event.target is None
+        assert event.source is None
 
     def test_invalid_event_id(self):
         with pytest.raises(ValidationError):
@@ -198,3 +208,34 @@ class TestVLMAnnotation:
         }
         annotation = VLMAnnotation.model_validate(data)
         assert annotation.objects[0].category == "person"
+
+    def test_from_dict_with_attributes(self):
+        data = {
+            "objects": [
+                {
+                    "obj_id": "cup_01",
+                    "category": "cup",
+                    "first_seen_frame": 0,
+                    "attributes": {"color": "red", "pose": None},
+                }
+            ],
+            "events": [],
+        }
+        annotation = VLMAnnotation.model_validate(data)
+        assert annotation.objects[0].attributes == {"color": "red", "pose": None}
+
+    def test_from_dict_legacy_list_attributes(self):
+        """Legacy list[str] attributes are coerced to empty dict."""
+        data = {
+            "objects": [
+                {
+                    "obj_id": "cup_01",
+                    "category": "cup",
+                    "first_seen_frame": 0,
+                    "attributes": ["red", "ceramic"],
+                }
+            ],
+            "events": [],
+        }
+        annotation = VLMAnnotation.model_validate(data)
+        assert annotation.objects[0].attributes == {}
