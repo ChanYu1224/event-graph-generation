@@ -1,0 +1,105 @@
+# Object categories and attribute vocabulary
+# Shared across all VLM config variants (vlm.yaml, vlm_vllm.yaml, vlm_vllm_server.yaml)
+
+categories:
+  - person
+  - hand
+  - chair
+  - desk
+  - laptop
+  - monitor
+  - phone
+  - keyboard
+  - mouse
+  - tablet
+  - pen
+  - notebook
+  - book
+  - bookshelf
+  - shelf
+  - cup
+  - drawer
+  - curtain
+  - jacket
+  - backpack
+  - box
+  - speaker
+  - microphone
+  - stool
+  - pc_case
+  - earbuds
+  - smartphone
+  - case
+
+# Allowed attribute vocabulary (axis -> values)
+attribute_vocab:
+  color:
+    - white
+    - black
+    - red
+    - blue
+    - green
+    - yellow
+    - orange
+    - brown
+    - pink
+    - purple
+    - gray
+    - silver
+    - beige
+    - transparent
+    - multicolored
+  material:
+    - metal
+    - plastic
+    - wooden
+    - glass
+    - ceramic
+    - fabric
+    - leather
+    - paper
+    - cardboard
+    - rubber
+    - silicone
+    - mesh
+  position:
+    - on_floor
+    - on_desk
+    - on_shelf
+    - on_wall
+    - on_chair
+    - on_lap
+    - in_hand
+    - in_drawer
+    - in_bag
+    - hanging
+    - mounted
+    - stacked
+  size:
+    - small
+    - medium
+    - large
+  state:
+    - open
+    - closed
+    - filled
+    - empty
+    - powered_on
+    - powered_off
+    - folded
+    - unfolded
+    - worn
+    - locked
+  orientation:
+    - upright
+    - tilted
+    - flat
+    - inverted
+    - sideways
+  pose:
+    - standing
+    - sitting
+    - crouching
+    - walking
+    - leaning
+    - reaching

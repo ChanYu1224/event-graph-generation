@@ -12,6 +12,13 @@ from tqdm import tqdm
 
 from event_graph_generation.annotation.validator import AnnotationValidator
 from event_graph_generation.annotation.vlm_annotator import VLMAnnotator
+from event_graph_generation.data.frame_sampler import FrameSampler
+from event_graph_generation.utils.timestamps import (
+    compute_clip_timestamps,
+    enrich_clips,
+    offset_to_iso,
+    parse_video_start_time,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -47,6 +54,12 @@ def parse_args() -> argparse.Namespace:
         help="Actions vocabulary YAML (default: configs/actions.yaml)",
     )
     parser.add_argument(
+        "--vocab-config",
+        type=Path,
+        default=Path("configs/vocab.yaml"),
+        help="Categories and attribute vocabulary YAML (default: configs/vocab.yaml)",
+    )
+    parser.add_argument(
         "--resume",
         action="store_true",
         help="Skip already-processed videos",
@@ -72,6 +85,24 @@ def load_actions_config(actions_path: Path) -> tuple[list[str], list[dict]]:
     action_entries = cfg.get("actions", [])
     action_names = [entry["name"] for entry in action_entries]
     return action_names, action_entries
+
+
+def load_vocab_config(
+    vocab_path: Path,
+) -> tuple[list[str], dict[str, list[str]]]:
+    """Load categories and attribute vocabulary from YAML.
+
+    Args:
+        vocab_path: Path to the vocabulary YAML file.
+
+    Returns:
+        Tuple of (categories, attribute_vocab).
+    """
+    with open(vocab_path, encoding="utf-8") as f:
+        cfg = yaml.safe_load(f)
+    categories: list[str] = cfg.get("categories", [])
+    attribute_vocab: dict[str, list[str]] = cfg.get("attribute_vocab", {})
+    return categories, attribute_vocab
 
 
 def discover_videos(video_dir: Path) -> list[Path]:
@@ -110,9 +141,14 @@ def main() -> None:
 
     logger.info("Loaded %d actions from %s", len(action_names), args.actions_config)
 
-    # Extract categories from actions config (not specified separately, use empty for now)
-    # Categories are discovered dynamically by the VLM; we pass an open list
-    categories: list[str] = vlm_cfg.get("categories", [])
+    # Load categories and attribute vocabulary from vocab config
+    categories, attribute_vocab = load_vocab_config(args.vocab_config)
+    logger.info(
+        "Loaded %d categories and %d attribute axes from %s",
+        len(categories),
+        len(attribute_vocab),
+        args.vocab_config,
+    )
 
     # Discover videos
     videos = discover_videos(args.video_dir)
@@ -153,6 +189,8 @@ def main() -> None:
         max_model_len=vlm_cfg.get("max_model_len", 32768),
         max_num_seqs=vlm_cfg.get("max_num_seqs", 5),
         limit_mm_per_prompt=vlm_cfg.get("limit_mm_per_prompt", 16),
+        api_base=vlm_cfg.get("api_base", "http://localhost:8000/v1"),
+        max_concurrent_requests=vlm_cfg.get("max_concurrent_requests", 8),
     )
 
     # Initialize validator
@@ -160,12 +198,15 @@ def main() -> None:
         allowed_actions=action_names,
         allowed_categories=categories,
         action_config=action_entries,
+        attribute_vocab=attribute_vocab,
     )
 
     # Processing settings
     clip_length = vlm_cfg.get("clip_length", 16)
     clip_stride = vlm_cfg.get("clip_stride", 8)
     target_fps = vlm_cfg.get("target_fps", 1.0)
+    motion_filter_enabled = vlm_cfg.get("motion_filter_enabled", False)
+    motion_threshold = vlm_cfg.get("motion_threshold", 3.0)
 
     # Stats
     total_success = 0
@@ -185,6 +226,9 @@ def main() -> None:
                 clip_stride=clip_stride,
                 categories=categories,
                 actions=action_names,
+                attribute_vocab=attribute_vocab,
+                motion_filter_enabled=motion_filter_enabled,
+                motion_threshold=motion_threshold,
             )
 
             # Validate all clip annotations
@@ -192,13 +236,52 @@ def main() -> None:
             all_annotations.extend(validated)
             total_clips += len(annotations)
 
+            # Compute timestamp metadata
+            video_info = FrameSampler.get_video_info(video_path)
+            source_fps = video_info["fps"]
+            total_frames = video_info["total_frames"]
+            duration_sec = video_info["duration_sec"]
+
+            video_start_time = parse_video_start_time(video_id)
+            video_start_iso = video_start_time.strftime("%Y-%m-%dT%H:%M:%S")
+            video_end_iso = offset_to_iso(video_start_time, duration_sec)
+
+            clip_timestamps = compute_clip_timestamps(
+                source_fps=source_fps,
+                target_fps=target_fps,
+                total_frames=total_frames,
+                clip_length=clip_length,
+                clip_stride=clip_stride,
+                video_start_time=video_start_time,
+            )
+
+            # Enrich clips with metadata
+            clip_dicts = [ann.model_dump() for ann in validated]
+            enrichment = enrich_clips(clip_dicts, clip_timestamps)
+
             # Save as JSON
             output_data = {
                 "video_id": video_id,
                 "video_path": str(video_path),
+                "video_metadata": {
+                    "video_start_time": video_start_iso,
+                    "source_fps": round(source_fps, 2),
+                    "target_fps": target_fps,
+                    "total_frames": total_frames,
+                    "duration_sec": round(duration_sec, 1),
+                    "video_end_time": video_end_iso,
+                },
+                "coverage": {
+                    "total_clips": len(validated),
+                    "annotated_clips": enrichment.annotated_clips,
+                    "motion_filtered_clips": enrichment.motion_filtered_clips,
+                    "clips_with_events": enrichment.clips_with_events,
+                    "time_range": f"{video_start_iso} ~ {video_end_iso}",
+                    "motion_filtered_ranges": enrichment.motion_filtered_ranges,
+                },
                 "num_clips": len(validated),
                 "validation_stats": stats,
-                "clips": [ann.model_dump() for ann in validated],
+                "clips": enrichment.clips,
             }
 
             with open(output_path, "w", encoding="utf-8") as f:

@@ -1,0 +1,15 @@
+vlm:
+  model_name: "Qwen/Qwen3.5-35B-A3B"
+  backend: "vllm-server"
+  api_base: "http://localhost:8002/v1"
+  max_new_tokens: 4096
+  temperature: 0.1
+  thinking: false
+  clip_length: 16
+  clip_stride: 8
+  target_fps: 1.0
+  max_retries: 3
+  output_dir: "data/annotations"
+  max_concurrent_requests: 8
+  motion_filter_enabled: true
+  motion_threshold: 3.0
