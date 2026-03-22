@@ -34,9 +34,11 @@ class Evaluator:
 
         for batch in dataloader:
             if is_event_decoder is None:
-                is_event_decoder = hasattr(batch, "object_embeddings")
+                is_event_decoder = hasattr(batch, "object_embeddings") or hasattr(batch, "vjepa_tokens")
 
-            if is_event_decoder:
+            if hasattr(batch, "vjepa_tokens"):
+                self._process_vjepa_batch(model, batch, all_predictions, all_gt_events)
+            elif hasattr(batch, "object_embeddings"):
                 self._process_event_batch(model, batch, all_predictions, all_gt_events)
             else:
                 outputs = model(batch.inputs.to(self.device))
@@ -67,6 +69,21 @@ class Evaluator:
             results[name] = metric_fn(pred_dict, target_dict)
 
         return results
+
+    def _process_vjepa_batch(
+        self,
+        model: nn.Module,
+        batch: object,
+        all_predictions: list,
+        all_gt_events: list,
+    ) -> None:
+        """Run model on a single VJEPAEventBatch and collect results."""
+        batch = batch.to(self.device)
+        use_amp = str(self.device).startswith("cuda") and torch.cuda.is_available()
+        with torch.amp.autocast("cuda", enabled=use_amp):
+            _obj_repr, predictions = model(batch.vjepa_tokens)
+        all_predictions.append(predictions)
+        all_gt_events.extend(batch.gt_events)
 
     def _process_event_batch(
         self,
