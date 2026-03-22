@@ -1,0 +1,14 @@
+# V-JEPA 2.1 ViT-G (Gigantic) training override
+# Usage: --config configs/vjepa_training.yaml --override configs/experiment/vjepa_gigantic.yaml
+vjepa:
+  hub_model_name: "vjepa2_1_vit_gigantic_384"
+  hidden_size: 1664
+  features_dir: "data/vjepa_features_v21_vitG"
+
+data:
+  processed_dir: "data/vjepa_aligned_v21_vitG"
+  splits_dir: "data/vjepa_aligned_v21_vitG/splits"
+
+wandb:
+  tags: ["vjepa_pipeline", "slot_attention", "vjepa_2.1", "vit_G"]
+  notes: "V-JEPA 2.1 ViT-G (Gigantic) + Slot Attention + Event Decoder"

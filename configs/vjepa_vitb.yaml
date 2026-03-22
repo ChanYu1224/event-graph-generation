@@ -1,0 +1,13 @@
+# V-JEPA 2.1 ViT-B feature extraction configuration (80M params)
+vjepa:
+  backend: "hub"
+  hub_model_name: "vjepa2_1_vit_base_384"
+  hub_repo: "facebookresearch/vjepa2"
+  image_size: 384
+  frames_per_clip: 16
+  hidden_size: 768
+  total_tokens: 4608       # 8 temporal × 576 spatial
+  temporal_tokens: 8
+  spatial_tokens: 576      # (384/16)²
+  dtype: "bfloat16"
+  features_dir: "data/vjepa_features_v21_vitb"

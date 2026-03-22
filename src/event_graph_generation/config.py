@@ -21,6 +21,33 @@ class DataConfig:
 
 
 @dataclass
+class VJEPAConfig:
+    backend: str = "hub"  # "hub" (PyTorch Hub, 2.1) or "hf" (HuggingFace, 2.0)
+    model_name: str = "facebook/vjepa2-vitl-fpc64-256"  # HF用 (backend="hf")
+    hub_model_name: str = "vjepa2_1_vit_large_384"  # Hub用 (backend="hub")
+    hub_repo: str = "facebookresearch/vjepa2"
+    image_size: int = 384
+    frames_per_clip: int = 16
+    hidden_size: int = 1024
+    total_tokens: int = 4608  # 8 temporal × 576 spatial
+    temporal_tokens: int = 8
+    spatial_tokens: int = 576  # (384/16)²
+    dtype: str = "bfloat16"
+    features_dir: str = "data/vjepa_features"
+
+
+@dataclass
+class ObjectPoolingConfig:
+    num_slots: int = 24
+    d_model: int = 256
+    num_iterations: int = 3
+    num_refinement_layers: int = 2
+    nhead: int = 8
+    n_categories: int = 29
+    dropout: float = 0.1
+
+
+@dataclass
 class ModelConfig:
     name: str = "base_model"
     # Event Decoder parameters
@@ -36,6 +63,8 @@ class ModelConfig:
     d_pair: int = 7
     num_actions: int = 13
     embedding_dim: int = 256
+    # Object Pooling parameters (used by vjepa_pipeline)
+    object_pooling: ObjectPoolingConfig = field(default_factory=ObjectPoolingConfig)
 
 
 @dataclass
@@ -154,6 +183,7 @@ class Config:
     sam3: SAM3Config = field(default_factory=SAM3Config)
     vlm: VLMConfig = field(default_factory=VLMConfig)
     inference: InferenceConfig = field(default_factory=InferenceConfig)
+    vjepa: VJEPAConfig = field(default_factory=VJEPAConfig)
 
     @classmethod
     def from_yaml(cls, path: str | Path) -> Config:
@@ -168,9 +198,15 @@ class Config:
         if "data" in d:
             cfg.data = _update_dataclass(cfg.data, d["data"])
         if "model" in d:
-            cfg.model = _update_dataclass(cfg.model, d["model"])
+            model_d = d["model"].copy()
+            if "object_pooling" in model_d:
+                cfg.model.object_pooling = _update_dataclass(
+                    cfg.model.object_pooling, model_d.pop("object_pooling")
+                )
+            cfg.model = _update_dataclass(cfg.model, model_d)
         if "training" in d:
             training_d = d["training"].copy()
+            loss_weights_d = training_d.pop("loss_weights", None)
             if "scheduler_params" in training_d:
                 sp = _update_dataclass(
                     cfg.training.scheduler_params, training_d.pop("scheduler_params")
@@ -179,9 +215,9 @@ class Config:
                 cfg.training.scheduler_params = sp
             else:
                 cfg.training = _update_dataclass(cfg.training, training_d)
-            if "loss_weights" in d["training"]:
+            if loss_weights_d is not None:
                 cfg.training.loss_weights = _update_dataclass(
-                    cfg.training.loss_weights, d["training"]["loss_weights"]
+                    cfg.training.loss_weights, loss_weights_d
                 )
         if "evaluation" in d:
             cfg.evaluation = _update_dataclass(cfg.evaluation, d["evaluation"])
@@ -198,6 +234,8 @@ class Config:
                     cfg.inference.sam3, inference_d.pop("sam3")
                 )
             cfg.inference = _update_dataclass(cfg.inference, inference_d)
+        if "vjepa" in d:
+            cfg.vjepa = _update_dataclass(cfg.vjepa, d["vjepa"])
         return cfg
 
     def merge(self, override_path: str | Path) -> Config:

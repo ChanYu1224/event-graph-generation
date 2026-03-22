@@ -1,0 +1,74 @@
+# V-JEPA Pipeline training configuration
+data:
+  processed_dir: "data/vjepa_aligned_v21_vitl"
+  splits_dir: "data/vjepa_aligned_v21_vitl/splits"
+  batch_size: 16
+  num_workers: 4
+  pin_memory: true
+
+model:
+  name: "vjepa_pipeline"
+  d_model: 256
+  nhead: 8
+  num_context_encoder_layers: 3
+  num_event_decoder_layers: 4
+  num_event_queries: 20
+  dropout: 0.1
+  num_actions: 13
+  object_pooling:
+    num_slots: 24
+    d_model: 256
+    num_iterations: 3
+    num_refinement_layers: 2
+    nhead: 8
+    n_categories: 29       # 28 categories + 1 unknown
+    dropout: 0.1
+
+vjepa:
+  backend: "hub"
+  hub_model_name: "vjepa2_1_vit_large_384"
+  hidden_size: 1024
+  total_tokens: 4608
+  temporal_tokens: 8
+  spatial_tokens: 576
+  features_dir: "data/vjepa_features_v21_vitl"
+
+training:
+  epochs: 100
+  learning_rate: 1.0e-4
+  weight_decay: 1.0e-4
+  optimizer: adamw
+  scheduler: cosine_warmup
+  scheduler_params:
+    T_max: 100
+    warmup_epochs: 5
+  grad_clip_norm: 1.0
+  seed: 42
+  device: cuda
+  checkpoint_dir: "data/checkpoints_vjepa"
+  save_every_n_epochs: 10
+  early_stopping_patience: 15
+  loss_weights:
+    interaction: 2.0
+    action: 1.0
+    agent_ptr: 1.0
+    target_ptr: 1.0
+    source_ptr: 0.5
+    dest_ptr: 0.5
+    frame: 0.5
+
+evaluation:
+  metrics:
+    - event_detection_map
+    - action_accuracy
+    - pointer_accuracy
+    - frame_mae
+    - graph_f1
+  eval_every_n_epochs: 1
+
+wandb:
+  enabled: true
+  project: "event_graph_generation"
+  entity: null
+  tags: ["vjepa_pipeline", "slot_attention", "vjepa_2.1"]
+  notes: "V-JEPA 2.1 ViT-L + Slot Attention + Event Decoder"
