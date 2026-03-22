@@ -8,6 +8,7 @@ import torch
 import torch.nn as nn
 
 from .heads import PredictionHead
+from .object_pooling import ObjectRepresentation
 
 
 @dataclass
@@ -181,6 +182,152 @@ class EventDecoder(nn.Module):
         )  # (B, M, K+1)
         source_ptr = source_ptr.masked_fill(~src_dest_mask, neg_inf)
         dest_ptr = dest_ptr.masked_fill(~src_dest_mask, neg_inf)
+
+        return EventPredictions(
+            interaction=interaction,
+            action=action,
+            agent_ptr=agent_ptr,
+            target_ptr=target_ptr,
+            source_ptr=source_ptr,
+            dest_ptr=dest_ptr,
+            frame=frame,
+        )
+
+
+class VJEPAEventDecoder(nn.Module):
+    """Event decoder that takes ObjectRepresentation from Object Pooling Module.
+
+    Unlike the original EventDecoder which uses SAM3 embeddings and geometric
+    features, this decoder operates on slot-based object representations
+    produced by the Object Pooling Module.
+    """
+
+    def __init__(
+        self,
+        d_model: int = 256,
+        nhead: int = 8,
+        num_context_encoder_layers: int = 3,
+        num_event_decoder_layers: int = 4,
+        num_event_queries: int = 20,
+        num_slots: int = 24,
+        dropout: float = 0.1,
+        num_actions: int = 13,
+        temporal_window: int = 16,
+    ) -> None:
+        """Initialize VJEPAEventDecoder.
+
+        Args:
+            d_model: Model dimension.
+            nhead: Number of attention heads.
+            num_context_encoder_layers: Context encoder layers.
+            num_event_decoder_layers: Event decoder layers.
+            num_event_queries: Number of learnable event queries M.
+            num_slots: Number of object slots K from Object Pooling.
+            dropout: Dropout rate.
+            num_actions: Number of action classes.
+            temporal_window: Temporal window size for frame prediction.
+        """
+        super().__init__()
+        self.d_model = d_model
+        self.num_event_queries = num_event_queries
+        self.num_slots = num_slots
+        self.temporal_window = temporal_window
+
+        # Context encoder: self-attention over object slots
+        context_layer = nn.TransformerEncoderLayer(
+            d_model=d_model, nhead=nhead, dropout=dropout, batch_first=True
+        )
+        self.context_encoder = nn.TransformerEncoder(
+            context_layer, num_layers=num_context_encoder_layers
+        )
+
+        # Learnable event queries
+        self.event_queries = nn.Parameter(
+            torch.randn(num_event_queries, d_model) / (d_model ** 0.5)
+        )
+
+        # Event decoder: cross-attention between queries and object slots
+        decoder_layer = nn.TransformerDecoderLayer(
+            d_model=d_model, nhead=nhead, dropout=dropout, batch_first=True
+        )
+        self.event_decoder = nn.TransformerDecoder(
+            decoder_layer, num_layers=num_event_decoder_layers
+        )
+
+        # Prediction heads
+        d_hidden = d_model
+        self.interaction_head = PredictionHead(d_model, d_hidden, 1, dropout=dropout)
+        self.action_head = PredictionHead(d_model, d_hidden, num_actions, dropout=dropout)
+        self.agent_ptr_head = PredictionHead(d_model, d_hidden, num_slots, dropout=dropout)
+        self.target_ptr_head = PredictionHead(d_model, d_hidden, num_slots, dropout=dropout)
+        self.source_ptr_head = PredictionHead(d_model, d_hidden, num_slots + 1, dropout=dropout)
+        self.dest_ptr_head = PredictionHead(d_model, d_hidden, num_slots + 1, dropout=dropout)
+        self.frame_head = PredictionHead(d_model, d_hidden, temporal_window, dropout=dropout)
+
+    def forward(
+        self,
+        obj_repr: ObjectRepresentation,
+        object_mask: torch.Tensor | None = None,
+    ) -> EventPredictions:
+        """Forward pass.
+
+        Args:
+            obj_repr: ObjectRepresentation from ObjectPoolingModule.
+            object_mask: Optional (B, K) boolean mask for valid objects.
+                If None, all slots are treated as valid (no pointer masking).
+                During training, the loss function manages masking externally.
+
+        Returns:
+            EventPredictions with all prediction head outputs.
+        """
+        B = obj_repr.identity.shape[0]
+        K = self.num_slots
+
+        # Combine identity and mean trajectory for object representation
+        object_repr = obj_repr.identity + obj_repr.trajectory.mean(dim=2)  # (B, K, d_model)
+
+        # Use provided mask or default to all-valid
+        if object_mask is not None:
+            src_key_padding_mask = ~object_mask  # (B, K)
+        else:
+            src_key_padding_mask = None
+
+        # Context encoder: self-attention with object mask
+        object_slots = self.context_encoder(
+            object_repr, src_key_padding_mask=src_key_padding_mask
+        )  # (B, K, d_model)
+
+        # Event decoder: cross-attention between event queries and object slots
+        queries = self.event_queries.unsqueeze(0).expand(B, -1, -1)  # (B, M, d_model)
+        event_repr = self.event_decoder(
+            queries,
+            object_slots,
+            memory_key_padding_mask=src_key_padding_mask,
+        )  # (B, M, d_model)
+
+        # Apply prediction heads
+        interaction = self.interaction_head(event_repr)  # (B, M, 1)
+        action = self.action_head(event_repr)  # (B, M, A)
+        agent_ptr = self.agent_ptr_head(event_repr)  # (B, M, K)
+        target_ptr = self.target_ptr_head(event_repr)  # (B, M, K)
+        source_ptr = self.source_ptr_head(event_repr)  # (B, M, K+1)
+        dest_ptr = self.dest_ptr_head(event_repr)  # (B, M, K+1)
+        frame = self.frame_head(event_repr)  # (B, M, T)
+
+        # Mask invalid objects in pointer logits (only when mask is provided)
+        if object_mask is not None:
+            ptr_mask = object_mask.unsqueeze(1).expand(-1, self.num_event_queries, -1)
+            neg_inf = float("-inf")
+
+            agent_ptr = agent_ptr.masked_fill(~ptr_mask, neg_inf)
+            target_ptr = target_ptr.masked_fill(~ptr_mask, neg_inf)
+
+            src_dest_mask = torch.cat(
+                [ptr_mask, torch.ones(B, self.num_event_queries, 1, device=object_repr.device, dtype=torch.bool)],
+                dim=2,
+            )  # (B, M, K+1)
+            source_ptr = source_ptr.masked_fill(~src_dest_mask, neg_inf)
+            dest_ptr = dest_ptr.masked_fill(~src_dest_mask, neg_inf)
 
         return EventPredictions(
             interaction=interaction,
