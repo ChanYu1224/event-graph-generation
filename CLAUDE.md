@@ -62,6 +62,7 @@ uv run python scripts/enrich_timestamps.py \
 
 ### Data Flow (End-to-End Pipeline)
 
+#### SAM3パイプライン（レガシー）
 ```
 Video → FrameSampler (1fps) → frames
   ├→ SAM3Tracker → tracking results (objects, embeddings, masks, bboxes per frame)
@@ -78,6 +79,28 @@ Training: EventGraphDataset loads .pt → EventDecoder learns event prediction
 Inference: SAM3 → FeatureExtractor → EventDecoder → postprocess → EventGraph JSON
 ```
 
+#### V-JEPAパイプライン（新規）
+```
+Video → FrameSampler (1fps) → 16-frame clips
+  ├→ V-JEPA 2.1 [frozen] → tokens → data/vjepa_features_v21_vitl/ (or vitg)
+  │    backends: "hub" (PyTorch Hub, 2.1, 384px) / "hf" (HuggingFace, 2.0, 256px)
+  │    variants: ViT-B (768d) / ViT-L (1024d) / ViT-g (1408d) / ViT-G (1664d), all 4608 tokens
+  └→ VLMAnnotator → VLMAnnotation (objects, events)
+       └→ 4b_build_vjepa_dataset.py → data/vjepa_aligned_v21_vitl/samples/*.pt
+
+Training:
+  VJEPAEventDataset → VJEPAPipeline:
+    ObjectPoolingModule (Slot Attention, K=24 slots)
+    → ObjectRepresentation (identity, trajectory, existence, categories)
+    → VJEPAEventDecoder (cross-attn, M=20 queries, 7 prediction heads)
+    → EventPredictions
+
+  VJEPAEventGraphLoss:
+    1. Slot-Object Matching (category-based Hungarian)
+    2. Event Loss (remapped gt_events → EventGraphLoss)
+    3. Category CE + Existence BCE
+```
+
 ### Source Modules
 
 ```
@@ -85,8 +108,8 @@ src/event_graph_generation/
 ├── schemas/           # ObjectNode, EventEdge, EventGraph dataclasses; VLMAnnotation (Pydantic)
 ├── annotation/        # VLM-based synthetic annotation: vlm_annotator, prompts, alignment, validator
 ├── tracking/          # SAM3 wrapper (sam3_tracker) + temporal/pairwise feature extraction
-├── data/              # EventGraphDataset (.pt loader), EventBatch collator, FrameSampler (OpenCV)
-├── models/            # EventDecoder (DETR-style), 7 prediction heads (MLP), EventGraphLoss
+├── data/              # EventGraphDataset, VJEPAEventDataset, collators, FrameSampler
+├── models/            # EventDecoder, VJEPAEventDecoder, ObjectPoolingModule, VJEPAPipeline, losses
 ├── training/          # Trainer (AMP, early stopping, WandB), optimizer/scheduler factories
 ├── evaluation/        # Evaluator, metric registry (event_detection_map, action_accuracy, etc.)
 ├── inference/         # InferencePipeline (sliding window + NMS dedup), postprocessing
@@ -94,9 +117,13 @@ src/event_graph_generation/
 └── utils/             # seed_everything, setup_logging, save/load_checkpoint, motion, timestamps
 ```
 
-### Event Decoder Model
+### Event Decoder Model (SAM3版)
 
 Temporal Encoder → Context Encoder (self-attention) → Event Decoder (cross-attention, learnable event queries M個) → 7つの予測ヘッド (interaction, action, agent/target/source/dest pointers, frame)。学習時はHungarian Matchingで予測↔GTの最適割当。詳細は `models/event_decoder.py` のdocstringを参照。
+
+### V-JEPA Pipeline Model
+
+V-JEPA tokens (hub: 2.1 384px / hf: 2.0 256px) → **ObjectPoolingModule** (InputProjection → SpatiotemporalSlotAttention K=24 slots × 3 iterations → SlotRefinement 2層self-attn → TemporalTrajectoryExtractor) → ObjectRepresentation → **VJEPAEventDecoder** (Context Encoder → Event Decoder cross-attn M=20 queries → 7予測ヘッド)。Slot Attentionはslot軸softmaxで競合的バインディング、GRU+残差MLPで更新。学習時はSlot-Object Matching（カテゴリベース）でGTインデックスをリマップしてからEventGraphLossを適用。
 
 ## Design Patterns
 
@@ -112,8 +139,10 @@ Temporal Encoder → Context Encoder (self-attention) → Event Decoder (cross-a
 
 - **オプショナル依存**: `try/except ImportError` + `_SAM3_AVAILABLE` / `_WANDB_AVAILABLE` / `_VLLM_AVAILABLE` / `_OPENAI_AVAILABLE` フラグパターン。未インストールでもgraceful degradation
 - **Config追加**: dataclass にフィールド追加 → `_from_dict()` でネストdataclass対応。`configs/default.yaml` がベース設定
-- **`build_model()` ファクトリ** (`models/base.py`): `config.name` でディスパッチ、遅延インポート。新モデル追加時ここに登録
+- **`build_model()` ファクトリ** (`models/base.py`): `config.name` でディスパッチ (`"event_decoder"`, `"vjepa_pipeline"`)、遅延インポート。新モデル追加時ここに登録
 - **ポインタヘッドの K+1 規約**: `source_ptr`/`dest_ptr` は `(M, K+1)` で最後のスロットが "none"（アクション依存で任意）
+- **VJEPAEventDecoder のマスキング**: ポインタlogitsのマスキングは `object_mask` 引数で外部制御。学習時は `VJEPAEventGraphLoss` がmatched slotsを含む正しいマスクを構築して `EventGraphLoss` に渡す。推論時は `existence > 0.5` のマスクを明示的に渡す
+- **Slot-Object Matching**: 学習時、slotのカテゴリ予測とVLMオブジェクトのカテゴリでHungarian Matching → gt_eventsのobject indexをslot indexにリマップしてイベント損失を計算
 - **`__init__.py` エクスポート**: `schemas/`, `tracking/`, `annotation/`, `inference/` は明示的 `__all__`、他は最小限
 
 ## Configuration
@@ -128,11 +157,17 @@ Temporal Encoder → Context Encoder (self-attention) → Event Decoder (cross-a
 - `configs/sam3.yaml` — SAM3トラッキングベース設定
 - `configs/sam3_kitchen.yaml`, `sam3_desk.yaml`, `sam3_room.yaml` — ドメイン別SAM3設定
 - `configs/actions.yaml` — アクション語彙定義（13クラス、source/destination要否フラグ）
+- `configs/vjepa.yaml` — V-JEPA 2.1 ViT-L 特徴量抽出設定（384px, hub backend）
+- `configs/vjepa_vitb.yaml` — V-JEPA 2.1 ViT-B 特徴量抽出設定（384px, 80M params）
+- `configs/vjepa_vitg.yaml` — V-JEPA 2.1 ViT-g 特徴量抽出設定（384px, 1B params）
+- `configs/vjepa_gigantic.yaml` — V-JEPA 2.1 ViT-G (Gigantic) 特徴量抽出設定（384px, 2B params）
+- `configs/vjepa_training.yaml` — V-JEPAパイプライン学習設定（ViT-L 2.1ベース）
 - `configs/experiment/` — 実験ごとのオーバーライド（`--override`で深いマージ）
 
 ## Key Dependencies
 
 - `transformers` は PyPI リリースではなく git main からインストール（`pyproject.toml` 参照）
+- `timm`, `einops` は V-JEPA 2.1 PyTorch Hub backend の内部依存
 - `sam3` は `try/except` でオプショナル扱い（未インストールでもテスト・他機能は動作）
 - `vllm` はオプショナル（`pip install vllm>=0.11.0`、transformers git mainと競合するため`pyproject.toml`には未宣言）
 - `openai` はオプショナル（vllm-server バックエンド使用時のみ必要）
