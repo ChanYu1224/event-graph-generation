@@ -1,0 +1,17 @@
+# V-JEPA 2.1 ViT-L DDP training override
+# Usage: --config configs/vjepa_training.yaml --override configs/experiment/vjepa_vitl_ddp.yaml
+data:
+  batch_size: 64          # per-GPU (effective: 64 × 4 = 256)
+  num_workers: 4
+
+training:
+  learning_rate: 4.0e-4   # sqrt scaling: 1e-4 × sqrt(256/16) = 4e-4
+  scheduler_params:
+    T_max: 100
+    warmup_epochs: 10
+  early_stopping_patience: 20
+
+wandb:
+  enabled: true
+  tags: ["vjepa_pipeline", "slot_attention", "vjepa_2.1", "vit_l", "ddp"]
+  notes: "V-JEPA 2.1 ViT-L + Slot Attention + Event Decoder (4-GPU DDP)"

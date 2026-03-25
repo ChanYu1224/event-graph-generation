@@ -1,0 +1,25 @@
+# V-JEPA 2.1 ViT-B DDP training override
+# Usage: --config configs/vjepa_training.yaml --override configs/experiment/vjepa_vitb_ddp.yaml
+vjepa:
+  hub_model_name: "vjepa2_1_vit_base_384"
+  hidden_size: 768
+  features_dir: "data/vjepa_features_v21_vitb"
+
+data:
+  processed_dir: "data/vjepa_aligned_v21_vitb"
+  splits_dir: "data/vjepa_aligned_v21_vitb/splits"
+  batch_size: 64          # per-GPU (effective: 64 × 4 = 256)
+  num_workers: 4
+
+training:
+  learning_rate: 4.0e-4   # sqrt scaling: 1e-4 × sqrt(256/16) = 4e-4
+  scheduler_params:
+    T_max: 100
+    warmup_epochs: 10
+  early_stopping_patience: 20
+  checkpoint_dir: "checkpoints/vjepa_vitb"
+
+wandb:
+  enabled: true
+  tags: ["vjepa_pipeline", "slot_attention", "vjepa_2.1", "vit_b", "ddp"]
+  notes: "V-JEPA 2.1 ViT-B + Slot Attention + Event Decoder (4-GPU DDP)"

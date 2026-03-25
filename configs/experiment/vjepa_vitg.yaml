@@ -10,7 +10,7 @@ data:
   splits_dir: "data/vjepa_aligned_v21_vitg/splits"
 
 training:
-  checkpoint_dir: "data/checkpoints_vjepa_vitg"
+  checkpoint_dir: "checkpoints/vjepa_vitg"
 
 wandb:
   tags: ["vjepa_pipeline", "slot_attention", "vjepa_2.1", "vit_g"]

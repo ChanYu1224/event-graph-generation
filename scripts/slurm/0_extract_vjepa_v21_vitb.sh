@@ -6,7 +6,7 @@
 #SBATCH --gpus=1
 #SBATCH --cpus-per-task=8
 #SBATCH --mem=32G
-#SBATCH --time=2:00:00
+#SBATCH --time=24:00:00
 #SBATCH --output=logs/vjepa21_vitb_%j.log
 
 set -euo pipefail

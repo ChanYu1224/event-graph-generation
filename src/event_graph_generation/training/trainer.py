@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import logging
+from datetime import datetime
 from pathlib import Path
 
 import torch
@@ -66,6 +67,19 @@ class Trainer:
         self.current_epoch = 0
         self.best_metric = float("-inf")
 
+        # Append datetime suffix to checkpoint_dir
+        if self.is_main:
+            suffix = datetime.now().strftime("%Y%m%d_%H%M%S")
+            self.checkpoint_dir = Path(config.training.checkpoint_dir + f"_{suffix}")
+        else:
+            self.checkpoint_dir = Path(config.training.checkpoint_dir)
+        if self.is_ddp:
+            # Broadcast checkpoint dir from rank 0 to all ranks
+            dir_str = str(self.checkpoint_dir)
+            obj_list = [dir_str]
+            dist.broadcast_object_list(obj_list, src=0)
+            self.checkpoint_dir = Path(obj_list[0])
+
         # AMP support
         self.use_amp = str(config.training.device).startswith("cuda") and torch.cuda.is_available()
         self.scaler = torch.amp.GradScaler("cuda", enabled=self.use_amp)
@@ -86,6 +100,7 @@ class Trainer:
             wandb.init(
                 project=self.config.wandb.project,
                 entity=self.config.wandb.entity,
+                name=self.checkpoint_dir.name,
                 config=self.config.to_dict(),
                 tags=self.config.wandb.tags,
                 notes=self.config.wandb.notes,
@@ -105,15 +120,27 @@ class Trainer:
             train_loss, head_losses = self._train_one_epoch()
 
             if self.is_main:
-                logger.info(f"Epoch {epoch}/{self.config.training.epochs} - loss: {train_loss:.4f}")
+                head_str = ", ".join(f"{k}: {v:.4f}" for k, v in head_losses.items() if k != "total")
+                logger.info(f"Epoch {epoch}/{self.config.training.epochs} - loss: {train_loss:.4f} [{head_str}]")
 
             # Build log dict for this epoch
             log_dict: dict[str, float] = {"train/loss": train_loss, "epoch": epoch}
             for head_name, head_val in head_losses.items():
                 log_dict[f"train/{head_name}"] = head_val
 
-            # Evaluation (rank 0 only)
+            # Validation loss (all ranks participate for DDP consistency)
             val_loss = None
+            val_head_losses: dict[str, float] = {}
+            if self.val_loader is not None and (epoch + 1) % self.config.evaluation.eval_every_n_epochs == 0:
+                val_loss, val_head_losses = self._validate_one_epoch()
+                if self.is_main:
+                    val_head_str = ", ".join(f"{k}: {v:.4f}" for k, v in val_head_losses.items() if k != "total")
+                    logger.info(f"Epoch {epoch} - val_loss: {val_loss:.4f} [{val_head_str}]")
+                    log_dict["val/loss"] = val_loss
+                    for k, v in val_head_losses.items():
+                        log_dict[f"val/{k}"] = v
+
+            # Evaluation metrics (rank 0 only)
             if (
                 self.is_main
                 and self.val_loader is not None
@@ -123,7 +150,6 @@ class Trainer:
                 metrics = self.evaluator.evaluate(self._raw_model, self.val_loader)
                 logger.info(f"Epoch {epoch} - val metrics: {metrics}")
 
-                val_loss = metrics.get("loss", train_loss)
                 for k, v in metrics.items():
                     log_dict[f"val/{k}"] = v
 
@@ -139,13 +165,12 @@ class Trainer:
                     self.best_val_loss = check_loss
                     self.patience_counter = 0
                     # Save best model
-                    ckpt_dir = Path(self.config.training.checkpoint_dir)
-                    ckpt_dir.mkdir(parents=True, exist_ok=True)
+                    self.checkpoint_dir.mkdir(parents=True, exist_ok=True)
                     save_checkpoint(
                         self._raw_model,
                         self.optimizer,
                         epoch,
-                        ckpt_dir / "best.pt",
+                        self.checkpoint_dir / "best.pt",
                     )
                     logger.info(f"Saved best model at epoch {epoch} with loss {check_loss:.4f}")
                 else:
@@ -173,13 +198,12 @@ class Trainer:
 
             # Periodic checkpoint (rank 0 only)
             if self.is_main and (epoch + 1) % self.config.training.save_every_n_epochs == 0:
-                ckpt_dir = Path(self.config.training.checkpoint_dir)
-                ckpt_dir.mkdir(parents=True, exist_ok=True)
+                self.checkpoint_dir.mkdir(parents=True, exist_ok=True)
                 save_checkpoint(
                     self._raw_model,
                     self.optimizer,
                     epoch,
-                    ckpt_dir / f"epoch_{epoch:04d}.pt",
+                    self.checkpoint_dir / f"epoch_{epoch:04d}.pt",
                 )
 
     def _train_one_epoch(self) -> tuple[float, dict[str, float]]:
@@ -247,6 +271,52 @@ class Trainer:
         if self.scheduler is not None:
             self.scheduler.step()
 
+        avg_loss = total_loss / max(num_batches, 1)
+        avg_head_losses = {
+            k: v / max(num_batches, 1) for k, v in head_losses_sum.items()
+        }
+        return avg_loss, avg_head_losses
+
+    @torch.no_grad()
+    def _validate_one_epoch(self) -> tuple[float, dict[str, float]]:
+        """Compute validation loss and per-head losses."""
+        self.model.eval()
+        total_loss = 0.0
+        num_batches = 0
+        head_losses_sum: dict[str, float] = {}
+        device = self.config.training.device
+
+        for batch in self.val_loader:
+            with torch.amp.autocast("cuda", enabled=self.use_amp):
+                if hasattr(batch, "vjepa_tokens"):
+                    batch = batch.to(device)
+                    obj_repr, predictions = self.model(batch.vjepa_tokens)
+                    loss, head_losses = self.criterion(
+                        obj_repr, predictions,
+                        batch.gt_events, batch.gt_object_categories,
+                    )
+                elif hasattr(batch, "object_embeddings"):
+                    batch = batch.to(device)
+                    predictions = self.model(
+                        batch.object_embeddings,
+                        batch.object_temporal,
+                        batch.pairwise,
+                        batch.object_mask,
+                    )
+                    loss, head_losses = self.criterion(
+                        predictions, batch.gt_events, batch.object_mask
+                    )
+                else:
+                    outputs = self.model(batch.inputs.to(device))
+                    loss = self.criterion(outputs, batch.targets.to(device))
+                    head_losses = {}
+
+            total_loss += loss.item()
+            for k, v in head_losses.items():
+                head_losses_sum[k] = head_losses_sum.get(k, 0.0) + v
+            num_batches += 1
+
+        self.model.train()
         avg_loss = total_loss / max(num_batches, 1)
         avg_head_losses = {
             k: v / max(num_batches, 1) for k, v in head_losses_sum.items()
