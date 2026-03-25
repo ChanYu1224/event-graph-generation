@@ -8,7 +8,7 @@ echo "===== Step 2: Build V-JEPA Dataset ====="
 # Clean previous dataset to rebuild with all videos
 rm -rf data/vjepa_aligned/samples data/vjepa_aligned/splits
 
-uv run python scripts/4b_build_vjepa_dataset.py \
+uv run python scripts/3_build_dataset.py \
     --annotations-dir data/annotations \
     --features-dir data/vjepa_features \
     --output-dir data/vjepa_aligned \

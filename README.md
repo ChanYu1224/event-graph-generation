@@ -2,13 +2,13 @@
 
 動画から構造化されたイベントグラフを自動生成する深層学習フレームワーク。
 
-SAM 3 によるオブジェクト検出・追跡、Qwen VL による合成アノテーション生成、DETR 風 Event Decoder によるセット予測を組み合わせ、動画中の「誰が・何を・どこから・どこへ」をグラフ構造として出力します。
+V-JEPA による映像特徴抽出、Qwen VL による合成アノテーション生成、DETR 風 Event Decoder によるセット予測を組み合わせ、動画中の「誰が・何を・どこから・どこへ」をグラフ構造として出力します。
 
 ## 主な機能 / ユースケース
 
 - **構造化出力**: テキスト生成ではなく、Hungarian Matching によるセット予測でイベントグラフを直接出力
 - **End-to-End パイプライン**: 動画入力から EventGraph JSON 出力まで一貫した処理フロー
-- **合成データ生成**: SAM 3 のトラッキング結果と Qwen VL のアノテーションを自動アライメントし、学習データを構築
+- **合成データ生成**: V-JEPA の映像特徴と Qwen VL のアノテーションを組み合わせて学習データを構築
 - **軽量モデル**: Event Decoder は約 10-15M パラメータで高速推論が可能
 - **スライディングウィンドウ推論**: 長時間動画をクリップ分割 + NMS 重複排除で処理
 - **マルチバックエンド VLM**: transformers / VLLM / VLLM Server (OpenAI 互換 API) から選択可能
@@ -25,9 +25,9 @@ SAM 3 によるオブジェクト検出・追跡、Qwen VL による合成アノ
 |---|---|
 | 言語 | Python >= 3.13 |
 | 深層学習 | PyTorch >= 2.10, torchvision >= 0.25 |
-| オブジェクト追跡 | SAM 3 (Segment Anything Model 3) |
+| 映像特徴抽出 | V-JEPA 2.1 (PyTorch Hub) |
 | VLM アノテーション | Qwen 3.5 (transformers / VLLM) |
-| モデルアーキテクチャ | DETR 風セット予測 (Event Decoder) |
+| モデルアーキテクチャ | Object Pooling + DETR 風セット予測 (Event Decoder) |
 | 量子化 | bitsandbytes >= 0.48 |
 | 実験管理 | Weights & Biases (wandb) |
 | スキーマバリデーション | Pydantic >= 2.0 |
@@ -38,12 +38,13 @@ SAM 3 によるオブジェクト検出・追跡、Qwen VL による合成アノ
 
 ## モデル情報
 
-### SAM 3 (Segment Anything Model 3)
+### V-JEPA 2.1 (Video Joint Embedding Predictive Architecture)
 
-- **用途**: 動画中のオブジェクト検出・追跡・セグメンテーション
-- **モデルサイズ**: Large（デフォルト設定）
-- **パッケージ**: `sam3 >= 0.1.3`（PyPI）
-- **埋め込み次元**: 256
+- **用途**: 動画からの時空間特徴トークン抽出
+- **モデルバリエーション**: ViT-B / ViT-L / ViT-G / ViT-gigantic
+- **取得先**: PyTorch Hub (`facebookresearch/vjepa`)
+- **入力解像度**: 384px, 16 frames/clip
+- **出力**: 時空間トークン (B, S, D) — S = temporal_tokens x spatial_tokens
 
 ### Qwen 3.5 VL (Vision-Language Model)
 
@@ -57,7 +58,7 @@ SAM 3 によるオブジェクト検出・追跡、Qwen VL による合成アノ
 
 ### Event Decoder
 
-- **アーキテクチャ**: DETR 風セット予測モデル（Temporal Encoder → Context Encoder → Event Decoder → 7 予測ヘッド）
+- **アーキテクチャ**: V-JEPA トークン → Object Pooling (Slot Attention) → DETR 風 Event Decoder → 7 予測ヘッド
 - **パラメータ数**: 約 10-15M
 - **学習方式**: Hungarian Matching による最適割当（非自己回帰）
 
@@ -82,22 +83,11 @@ SAM 3 によるオブジェクト検出・追跡、Qwen VL による合成アノ
 
 | データ | パス | 形式 | 説明 |
 |---|---|---|---|
-| リサイズ済み動画 | `data/resized/` | MP4 | SAM 3 入力解像度に合わせたもの |
-| SAM 3 出力 | `data/sam3_outputs/` | PT | オブジェクト追跡結果（bbox, mask, embedding） |
+| リサイズ済み動画 | `data/resized/` | MP4 | V-JEPA 入力解像度 (384px) に合わせたもの |
+| V-JEPA 特徴 | `data/vjepa_features/` | PT | 時空間トークン (S, D) |
 | VLM アノテーション | `data/annotations/` | JSON | Qwen VL による合成アノテーション |
 | タイムスタンプ付きアノテーション | `data/annotations_enriched/` | JSON | 絶対時刻・メタデータ付き |
-| アライメント済み学習データ | `data/aligned/samples/` | PT | 特徴量 + GT イベント |
-
-### 学習データ形式 (`*.pt`)
-
-```python
-{
-    "object_embeddings": Tensor (N, D_emb),    # SAM 3 オブジェクト埋め込み
-    "object_temporal": Tensor (N, T, D_geo),   # 幾何特徴 (bbox, centroid, area, velocity 等)
-    "pairwise": Tensor (N, N, T, D_pair),      # ペアワイズ特徴 (IoU, 距離, 包含関係等)
-    "gt_events": list[dict]                     # 正解イベント
-}
-```
+| 学習データセット | `data/vjepa_aligned/` | PT + split txt | V-JEPA 特徴 + GT イベント |
 
 ## セットアップ
 
@@ -155,34 +145,40 @@ WandB を使用しない場合は、設定ファイルで `wandb.enabled: false`
 
 ### パイプライン全体の流れ
 
-データセット構築から学習・推論まで、`scripts/` 配下のスクリプトを番号順に実行します。
+データセット構築から学習・評価まで、`scripts/` 配下のスクリプトを番号順に実行します。
 
 ```
-1_resize_videos.py → 2_run_sam3_tracking.py → 3_generate_annotations.py
-    → 4_build_dataset.py → 5_train.py → 6_evaluate.py → 7_run_inference.py
+0_resize_videos.py → 1_extract_features.py → 2_generate_annotations.py
+    → 3_build_dataset.py → 4_train.py → 5_evaluate.py
 ```
 
 ### 1. 学習データ構築
 
 ```bash
-# Step 1: 動画リサイズ（SAM 3 解像度に合わせる）
-uv run python scripts/1_resize_videos.py \
+# Step 0: 動画リサイズ（V-JEPA 入力解像度 384px に合わせる）
+uv run python scripts/0_resize_videos.py \
   --input-dir data/mp4 \
   --output-dir data/resized
 
-# Step 2: SAM 3 によるオブジェクト追跡
-uv run python scripts/2_run_sam3_tracking.py \
-  --config configs/sam3.yaml \
-  --video-dir data/mp4
+# Step 1: V-JEPA 特徴抽出
+uv run python scripts/1_extract_features.py \
+  --config configs/vjepa.yaml \
+  --video-dir data/resized \
+  --output-dir data/vjepa_features
 
-# Step 3: VLM による合成アノテーション生成
-uv run python scripts/3_generate_annotations.py \
+# Step 2: VLM による合成アノテーション生成
+uv run python scripts/2_generate_annotations.py \
   --config configs/vlm.yaml \
-  --video-dir data/raw/
+  --video-dir data/resized/ \
+  --resume
 
-# Step 4: アライメント + データセット構築
-uv run python scripts/4_build_dataset.py \
-  --config configs/training.yaml
+# Step 3: データセット構築
+uv run python scripts/3_build_dataset.py \
+  --features-dir data/vjepa_features \
+  --output-dir data/vjepa_aligned \
+  --annotations-dir data/annotations \
+  --vocab configs/vocab.yaml \
+  --actions configs/actions.yaml
 ```
 
 **共通フラグ:**
@@ -192,75 +188,28 @@ uv run python scripts/4_build_dataset.py \
 | `--config` | YAML 設定ファイルの指定 |
 | `--override` | 実験オーバーライド設定（深いマージ） |
 | `--resume` | 処理済みスキップ（バッチ処理ステージ） |
-| `--shard-id` / `--num-shards` | マルチ GPU 並列化（script 2） |
 
 ### 2. 学習
 
 ```bash
 # 基本
-uv run python scripts/5_train.py --config configs/training.yaml
+uv run python scripts/4_train.py --config configs/vjepa_training.yaml
 
 # 実験オーバーライド付き
-uv run python scripts/5_train.py \
-  --config configs/training.yaml \
-  --override configs/experiment/event_decoder_v1.yaml
+uv run python scripts/4_train.py \
+  --config configs/vjepa_training.yaml \
+  --override configs/experiment/vjepa_vitb.yaml
 
 # 学習再開
-uv run python scripts/5_train.py \
-  --config configs/training.yaml \
+uv run python scripts/4_train.py \
+  --config configs/vjepa_training.yaml \
   --resume data/checkpoints/epoch_0050.pt
 ```
 
 ### 3. 評価
 
 ```bash
-uv run python scripts/6_evaluate.py --config configs/training.yaml
-```
-
-### 4. 推論（動画 → EventGraph）
-
-```bash
-uv run python scripts/7_run_inference.py \
-  --config configs/inference.yaml \
-  --video data/raw/video.mp4 \
-  --checkpoint data/checkpoints/best.pt \
-  --output output/event_graph.json
-```
-
-| 引数 | デフォルト | 説明 |
-|---|---|---|
-| `--config` | `configs/inference.yaml` | 推論設定ファイル |
-| `--video` | （必須） | 入力動画パス |
-| `--checkpoint` | （必須） | 学習済みチェックポイント |
-| `--output` | `output/event_graph.json` | 出力先パス |
-| `--confidence-threshold` | `0.5` | イベント検出の信頼度閾値 |
-| `--actions-config` | `configs/actions.yaml` | アクション語彙定義 |
-
-### 出力例（EventGraph JSON）
-
-```json
-{
-  "video_id": "assembly_001",
-  "nodes": [
-    {
-      "track_id": 0,
-      "category": "person",
-      "first_seen_frame": 0,
-      "last_seen_frame": 120
-    }
-  ],
-  "edges": [
-    {
-      "event_id": "evt_0000",
-      "agent_track_id": 0,
-      "action": "pick_up",
-      "target_track_id": 1,
-      "source_track_id": 2,
-      "frame": 15,
-      "confidence": 0.92
-    }
-  ]
-}
+uv run python scripts/5_evaluate.py --config configs/vjepa_training.yaml
 ```
 
 ### テスト
@@ -275,13 +224,12 @@ uv run pytest -k test_accuracy        # パターン指定
 
 | スクリプト | 役割 |
 |---|---|
-| `scripts/1_resize_videos.py` | 動画リサイズ（SAM 3 入力解像度） |
-| `scripts/2_run_sam3_tracking.py` | SAM 3 によるオブジェクト追跡 |
-| `scripts/3_generate_annotations.py` | VLM による合成アノテーション生成 |
-| `scripts/4_build_dataset.py` | アライメント + 学習データセット構築 |
-| `scripts/5_train.py` | Event Decoder の学習 |
-| `scripts/6_evaluate.py` | モデル評価 |
-| `scripts/7_run_inference.py` | 推論（動画 → EventGraph JSON） |
+| `scripts/0_resize_videos.py` | 動画リサイズ（V-JEPA 入力解像度 384px） |
+| `scripts/1_extract_features.py` | V-JEPA 特徴抽出 |
+| `scripts/2_generate_annotations.py` | VLM による合成アノテーション生成 |
+| `scripts/3_build_dataset.py` | V-JEPA 特徴 + アノテーション → 学習データセット構築 |
+| `scripts/4_train.py` | V-JEPA Pipeline の学習 |
+| `scripts/5_evaluate.py` | モデル評価 |
 | `scripts/enrich_timestamps.py` | 既存アノテーションへのタイムスタンプ付与 |
 | `scripts/benchmark_vram.py` | VRAM 使用量ベンチマーク |
 
@@ -296,40 +244,35 @@ event-graph-generation/
 ├── src/event_graph_generation/    # メインパッケージ
 │   ├── schemas/                   #   データ構造定義 (ObjectNode, EventEdge, EventGraph, VLMAnnotation)
 │   ├── annotation/                #   VLM 合成アノテーション (vlm_annotator, prompts, alignment, validator)
-│   ├── tracking/                  #   SAM 3 ラッパー + 時系列/ペアワイズ特徴抽出
-│   ├── data/                      #   データセット (EventGraphDataset), バッチ collation, フレームサンプリング
-│   ├── models/                    #   Event Decoder, 予測ヘッド (MLP), 損失関数 (EventGraphLoss)
+│   ├── tracking/                  #   トラッキング・特徴抽出
+│   ├── data/                      #   データセット (VJEPAEventDataset), バッチ collation, フレームサンプリング
+│   ├── models/                    #   VJEPAPipeline, ObjectPooling, EventDecoder, 損失関数
 │   ├── training/                  #   学習ループ (AMP, early stopping, WandB), optimizer/scheduler
 │   ├── evaluation/                #   評価器, メトリクスレジストリ
 │   ├── inference/                 #   推論パイプライン (sliding window + NMS), 後処理
 │   ├── config.py                  #   Dataclass ベース YAML 設定管理
 │   └── utils/                     #   シード固定, ロギング, チェックポイント I/O, モーション検出
 ├── scripts/                       # 実行スクリプト（番号順パイプライン）
-│   ├── 1_resize_videos.py
-│   ├── 2_run_sam3_tracking.py
-│   ├── 3_generate_annotations.py
-│   ├── 4_build_dataset.py
-│   ├── 5_train.py
-│   ├── 6_evaluate.py
-│   ├── 7_run_inference.py
+│   ├── 0_resize_videos.py
+│   ├── 1_extract_features.py
+│   ├── 2_generate_annotations.py
+│   ├── 3_build_dataset.py
+│   ├── 4_train.py
+│   ├── 5_evaluate.py
 │   ├── enrich_timestamps.py
 │   ├── benchmark_vram.py
 │   ├── local/                     #   ローカル実行用シェルラッパー
 │   └── slurm/                     #   SLURM 用シェルラッパー
 ├── configs/                       # YAML 設定ファイル
 │   ├── default.yaml               #   ベースデフォルト設定
-│   ├── training.yaml              #   学習ハイパーパラメータ
-│   ├── inference.yaml             #   推論パイプライン設定
+│   ├── vjepa.yaml                 #   V-JEPA 特徴抽出設定
+│   ├── vjepa_training.yaml        #   V-JEPA Pipeline 学習ハイパーパラメータ
 │   ├── vlm.yaml                   #   VLM 設定 (transformers)
 │   ├── vlm_vllm.yaml             #   VLM 設定 (VLLM)
 │   ├── vlm_vllm_server.yaml      #   VLM 設定 (VLLM Server)
-│   ├── sam3.yaml                  #   SAM 3 トラッキング設定
-│   ├── sam3_kitchen.yaml          #   ドメイン別 SAM 3 設定
-│   ├── sam3_desk.yaml
-│   ├── sam3_room.yaml
 │   ├── actions.yaml               #   アクション語彙定義（13クラス）
 │   ├── vocab.yaml                 #   オブジェクトカテゴリ・属性語彙
-│   └── experiment/                #   実験ごとのオーバーライド
+│   └── experiment/                #   実験ごとのオーバーライド (vjepa_vitb, vjepa_vitg 等)
 ├── tests/                         # テストコード
 ├── data/                          # データディレクトリ（共有ストレージへのシンボリックリンク）
 └── pyproject.toml                 # プロジェクト定義・依存関係
@@ -339,15 +282,14 @@ event-graph-generation/
 
 ### 計算資源
 
-- SAM 3 トラッキングには CUDA 対応 GPU が必須
+- V-JEPA 特徴抽出・学習・推論には CUDA 対応 GPU が必須
 - VLM アノテーション生成は使用モデルに応じて大量の VRAM を要求（Qwen3.5-35B-A3B は 4GPU 推奨）
-- 学習・推論は GPU 上での実行を前提とし、CPU のみの環境ではサポート外
 - テストはすべて CPU 上で小さい次元の合成データで実行可能
 
 ### 外部依存
 
 - `transformers` は PyPI リリースではなく **GitHub main ブランチ**からインストールされる（Qwen 3.5 サポートのため）
-- `sam3` はオプショナル依存。未インストールでも SAM 3 以外の機能（学習、評価等）は動作する
+- V-JEPA モデルは PyTorch Hub から自動ダウンロード（初回実行時にインターネット接続が必要）
 - `vllm` はオプショナル。`transformers` の git main と競合する可能性があるため `pyproject.toml` には未宣言
 - `openai` はオプショナル。VLLM Server バックエンド使用時のみ必要
 
@@ -363,4 +305,4 @@ event-graph-generation/
 
 ## ライセンス
 
-TBD
+MIT License 2.0

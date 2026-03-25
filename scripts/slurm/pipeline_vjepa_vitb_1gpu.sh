@@ -15,7 +15,7 @@ mkdir -p logs
 echo "===== Step 1: Build ViT-B Dataset ====="
 rm -rf data/vjepa_aligned_v21_vitb/samples data/vjepa_aligned_v21_vitb/splits
 
-uv run python scripts/4b_build_vjepa_dataset.py \
+uv run python scripts/3_build_dataset.py \
     --features-dir data/vjepa_features_v21_vitb \
     --output-dir data/vjepa_aligned_v21_vitb \
     --annotations-dir data/annotations \
@@ -28,6 +28,6 @@ wc -l data/vjepa_aligned_v21_vitb/splits/*.txt
 echo ""
 
 echo "===== Step 2: Train (1-GPU) ====="
-uv run python scripts/5_train.py \
+uv run python scripts/4_train.py \
     --config configs/vjepa_training.yaml \
     --override configs/experiment/vjepa_vitb.yaml

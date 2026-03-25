@@ -14,7 +14,7 @@ mkdir -p logs
 
 echo "===== Step 1: Build V-JEPA ViT-g Dataset ====="
 
-uv run python scripts/4b_build_vjepa_dataset.py \
+uv run python scripts/3_build_dataset.py \
     --features-dir data/vjepa_features_v21_vitg \
     --output-dir data/vjepa_aligned_v21_vitg \
     --annotations-dir data/annotations \
@@ -31,6 +31,6 @@ echo "===== Step 2: DDP Training (4-GPU) ====="
 uv run torchrun \
     --nproc_per_node=4 \
     --master_port=29503 \
-    scripts/5_train.py \
+    scripts/4_train.py \
     --config configs/vjepa_training.yaml \
     --override configs/experiment/vjepa_vitg_ddp.yaml
