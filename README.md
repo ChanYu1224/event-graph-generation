@@ -149,7 +149,7 @@ WandB を使用しない場合は、設定ファイルで `wandb.enabled: false`
 
 ```
 0_resize_videos.py → 1_extract_features.py → 2_generate_annotations.py
-    → 3_build_dataset.py → 4_train.py → 5_evaluate.py
+    → 3_build_dataset.py → 4_train.py → 5_evaluate.py → 6_run_inference.py
 ```
 
 ### 1. 学習データ構築
@@ -212,6 +212,70 @@ uv run python scripts/4_train.py \
 uv run python scripts/5_evaluate.py --config configs/vjepa_training.yaml
 ```
 
+### 4. 推論（動画 → EventGraph）
+
+学習済みモデルを使って、動画から直接イベントグラフを生成します。
+
+```bash
+uv run python scripts/6_run_inference.py \
+  --video data/resized/room/video.mp4 \
+  --checkpoint checkpoints/vjepa_vitl_20260323_094236/best.pt \
+  --config configs/vjepa_training.yaml \
+  --vjepa-config configs/vjepa.yaml \
+  --output output/event_graph.json
+```
+
+| 引数 | デフォルト | 説明 |
+|---|---|---|
+| `--video` | （必須） | 入力動画パス |
+| `--checkpoint` | （必須） | 学習済みチェックポイント (.pt) |
+| `--config` | `configs/vjepa_training.yaml` | 学習設定（モデル構造の定義） |
+| `--vjepa-config` | `configs/vjepa.yaml` | V-JEPA エンコーダ設定 |
+| `--override` | なし | 実験オーバーライド（ViT-B/G 等） |
+| `--output` | `output/event_graph.json` | 出力先パス |
+| `--confidence-threshold` | `0.5` | イベント検出の信頼度閾値 |
+| `--device` | `cuda` | 推論デバイス |
+
+**ViT-B モデルで推論する場合:**
+
+```bash
+uv run python scripts/6_run_inference.py \
+  --video data/resized/room/video.mp4 \
+  --checkpoint checkpoints/vjepa_vitb_20260323_094236/best.pt \
+  --config configs/vjepa_training.yaml \
+  --vjepa-config configs/vjepa.yaml \
+  --override configs/experiment/vjepa_vitb.yaml \
+  --output output/event_graph_vitb.json
+```
+
+### 出力例（EventGraph JSON）
+
+```json
+{
+  "video_id": "assembly_001",
+  "nodes": [
+    {
+      "track_id": 0,
+      "category": "person",
+      "first_seen_frame": 0,
+      "last_seen_frame": 120,
+      "confidence": 0.95
+    }
+  ],
+  "edges": [
+    {
+      "event_id": "evt_0000",
+      "agent_track_id": 0,
+      "action": "pick_up",
+      "target_track_id": 1,
+      "source_track_id": 2,
+      "frame": 15,
+      "confidence": 0.92
+    }
+  ]
+}
+```
+
 ### テスト
 
 ```bash
@@ -230,6 +294,7 @@ uv run pytest -k test_accuracy        # パターン指定
 | `scripts/3_build_dataset.py` | V-JEPA 特徴 + アノテーション → 学習データセット構築 |
 | `scripts/4_train.py` | V-JEPA Pipeline の学習 |
 | `scripts/5_evaluate.py` | モデル評価 |
+| `scripts/6_run_inference.py` | 推論（動画 → EventGraph JSON） |
 | `scripts/enrich_timestamps.py` | 既存アノテーションへのタイムスタンプ付与 |
 | `scripts/benchmark_vram.py` | VRAM 使用量ベンチマーク |
 
@@ -259,6 +324,7 @@ event-graph-generation/
 │   ├── 3_build_dataset.py
 │   ├── 4_train.py
 │   ├── 5_evaluate.py
+│   ├── 6_run_inference.py
 │   ├── enrich_timestamps.py
 │   ├── benchmark_vram.py
 │   ├── local/                     #   ローカル実行用シェルラッパー
@@ -302,6 +368,74 @@ event-graph-generation/
 
 - すべての Python 実行は `uv run` 経由で行うこと（仮想環境の手動 activate は不要）
 - 設定は dataclass ベースの YAML で管理。`--override` フラグにより深いマージが可能
+
+## HuggingFace からのダウンロード
+
+学習済みモデルとデータセットを HuggingFace Hub で公開しています。
+
+### 学習済みモデル
+
+| バリアント | HuggingFace リポジトリ | パラメータ数 |
+|---|---|---|
+| ViT-B | [Yuchn/event-graph-vitb](https://huggingface.co/Yuchn/event-graph-vitb) | ~10M |
+| ViT-L | [Yuchn/event-graph-vitl](https://huggingface.co/Yuchn/event-graph-vitl) | ~13M |
+| ViT-G | [Yuchn/event-graph-vitg](https://huggingface.co/Yuchn/event-graph-vitg) | ~15M |
+
+> **Note**: 上記はイベント予測用 Event Decoder の重みです。V-JEPA backbone は含まれず、別途 PyTorch Hub からロードされます。
+
+```python
+from huggingface_hub import hf_hub_download
+
+# モデル重みのダウンロード（ViT-L の場合）
+model_path = hf_hub_download(repo_id="Yuchn/event-graph-vitl", filename="model.pt")
+config_path = hf_hub_download(repo_id="Yuchn/event-graph-vitl", filename="config.yaml")
+
+# モデルの構築と読み込み
+import torch
+from event_graph_generation.config import Config
+from event_graph_generation.models.base import build_model
+
+config = Config.from_yaml(config_path)
+model = build_model(config.model, vjepa_config=config.vjepa)
+model.load_state_dict(torch.load(model_path, map_location="cpu"))
+model.eval()
+```
+
+### データセット
+
+| データセット | HuggingFace リポジトリ | 内容 |
+|---|---|---|
+| V-JEPA ViT-L 特徴量 + VLM アノテーション | [Yuchn/event-graph-vjepa-vitl-dataset](https://huggingface.co/datasets/Yuchn/event-graph-vjepa-vitl-dataset) | V-JEPA 2.1 ViT-L 時空間トークン (.pt) + Qwen 3.5 合成アノテーション (.json) |
+
+> **Note**: 全 67 動画のうち一部（5 動画、933 クリップ、約 16GB）を公開しています。
+
+```python
+from huggingface_hub import snapshot_download
+
+# データセット全体のダウンロード
+local_dir = snapshot_download(
+    repo_id="Yuchn/event-graph-vjepa-vitl-dataset",
+    repo_type="dataset",
+    local_dir="data/hf_dataset",
+)
+
+# 特徴量の読み込み
+import torch
+features = torch.load(
+    "data/hf_dataset/features/20260316_130406_tp00001/clip_0000.pt",
+    map_location="cpu",
+    weights_only=False,
+)
+vjepa_tokens = features["vjepa_tokens"]  # shape: (4608, 1024)
+
+# アノテーションの読み込み
+import json
+with open("data/hf_dataset/annotations/20260316_130406_tp00001.json") as f:
+    annotation = json.load(f)
+clip = annotation["clips"][0]
+print(clip["objects"])  # 検出オブジェクト
+print(clip["events"])   # イベントグラフ
+```
 
 ## ライセンス
 
